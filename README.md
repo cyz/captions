@@ -92,7 +92,7 @@ npm start
 
 ## Architecture
 
-The application uses the Next.js App Router and Node.js route handlers. Uploaded files and job metadata are stored under `data/jobs/<jobId>` and are intentionally excluded from Git.
+The application uses the Next.js App Router and Node.js route handlers. Local development stores files and metadata under `data/jobs/<jobId>`, which is intentionally excluded from Git.
 
 ```text
 Video + SRT upload
@@ -117,7 +117,31 @@ app/          Pages and API route handlers
 components/   Reusable interface components
 lib/          SRT, safe-zone, storage, queue, canvas, and FFmpeg logic
 data/         Local runtime files (not committed)
+worker/       Single-execution Azure render worker
+infra/        Azure Bicep template and deployment script
 ```
+
+### Azure Architecture
+
+The production deployment minimizes idle consumption:
+
+```text
+Browser -> scale-to-zero Container App -> Table Storage
+	|                 |
+	|                 +-> Queue Storage -> Container Apps Job
+	|                                        |
+	+---- signed Blob upload ----------------+
+														  |
+								 Blob input -> FFmpeg -> Blob output
+```
+
+- Videos upload directly from the browser to private Blob Storage using a short-lived SAS.
+- Job metadata and caption segments are stored in Table Storage.
+- Queue Storage triggers one FFmpeg Container Apps Job execution at a time.
+- The web app uses `0.25` vCPU and `0.5 GiB`, with zero minimum replicas.
+- The render job uses `1` vCPU and `2 GiB` only while processing.
+- Managed identities grant the web app and worker access to Storage.
+- Input blobs expire after one day and rendered outputs after seven days.
 
 ### API Routes
 
@@ -133,13 +157,27 @@ data/         Local runtime files (not committed)
 
 ## Deployment Notes
 
-This project requires a Node.js server with:
+The local backend requires a Node.js server with:
 
 - FFmpeg and ffprobe installed
 - A writable, persistent filesystem for the `data` directory
 - Enough memory and execution time to process uploaded videos
 
-GitHub Pages cannot run this application because it only serves static files. Serverless platforms with ephemeral filesystems or short execution limits will require replacing local storage and the in-process queue with persistent object storage and a background worker.
+GitHub Pages cannot run this application because it only serves static files. The Azure deployment uses persistent object storage and a background worker instead of relying on a server filesystem.
+
+### Azure
+
+The included deployment targets the `devtools` subscription in the `Advocates at DevRel 2611` tenant. It uses a private image published to GitHub Container Registry.
+
+1. Authenticate Azure CLI and GitHub CLI.
+2. Push the repository to `main` and wait for the **Build container image** workflow.
+3. Deploy the infrastructure:
+
+```bash
+./infra/deploy.sh
+```
+
+The script refuses to deploy if the active subscription does not belong to the expected tenant. The GitHub token is passed as a secure deployment parameter and stored only as a Container Apps registry secret.
 
 ### Netlify
 
@@ -150,4 +188,5 @@ Netlify can deploy the interface and Next.js route handlers, but the current vid
 - `npm run dev` starts the development server
 - `npm run build` creates a production build
 - `npm start` runs the production server
+- `npm run worker` processes one Azure Queue message and exits
 - `npm run check` runs the TypeScript compiler without emitting files
