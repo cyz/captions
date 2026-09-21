@@ -25,11 +25,21 @@ registry_name="$(az deployment group create \
   --query 'properties.outputs.registryName.value' \
   --output tsv)"
 
-az acr build \
-  --registry "$registry_name" \
-  --image "captions:$image_commit" \
-  --file Dockerfile \
-  .
+existing_tag="$(az acr repository show-tags \
+  --name "$registry_name" \
+  --repository captions \
+  --query "[?@ == '$image_commit'] | [0]" \
+  --output tsv 2>/dev/null || true)"
+
+if [[ "$existing_tag" == "$image_commit" ]]; then
+  printf 'Reusing existing image captions:%s\n' "$image_commit"
+else
+  az acr build \
+    --registry "$registry_name" \
+    --image "captions:$image_commit" \
+    --file Dockerfile \
+    .
+fi
 
 az deployment group create \
   --name 'caption-application' \
