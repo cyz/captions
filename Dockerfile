@@ -20,8 +20,9 @@ RUN apt-get update \
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/.next ./.next
+COPY --from=build /app/.next/static ./.next/standalone/.next/static
 COPY --from=build /app/lib ./lib
 COPY --from=build /app/worker ./worker
 COPY --from=build /app/next.config.js ./next.config.js
 EXPOSE 3000
-CMD ["npm", "start"]
+CMD ["node", ".next/standalone/server.js"]
