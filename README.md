@@ -167,17 +167,16 @@ GitHub Pages cannot run this application because it only serves static files. Th
 
 ### Azure
 
-The included deployment targets the `devtools` subscription in the `Advocates at DevRel 2611` tenant. It uses a private image published to GitHub Container Registry.
+The included deployment targets the `devtools` subscription in the `Advocates at DevRel 2611` tenant. It stores the private image in an Azure Container Registry Basic instance.
 
-1. Authenticate Azure CLI and GitHub CLI.
-2. Push the repository to `main` and wait for the **Build container image** workflow.
-3. Deploy the infrastructure:
+1. Authenticate Azure CLI.
+2. Deploy the registry, image, and application infrastructure:
 
 ```bash
 ./infra/deploy.sh
 ```
 
-The script refuses to deploy if the active subscription does not belong to the expected tenant. It deploys an immutable image tag derived from the latest application commit. The GitHub token is passed as a secure deployment parameter and stored only as a Container Apps registry secret.
+The script refuses to deploy if the active subscription does not belong to the expected tenant. It builds and deploys an immutable image tag derived from the latest application commit. Container Apps pulls the image through a dedicated managed identity, so registry passwords are not enabled or stored.
 
 ### Netlify
 

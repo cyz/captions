@@ -7,15 +7,8 @@ param namePrefix string = 'caption-burner'
 @description('Container image shared by the web app and render job.')
 param containerImage string
 
-@description('Private container registry host.')
-param registryServer string = 'ghcr.io'
-
-@description('Private container registry username.')
-param registryUsername string
-
-@secure()
-@description('Private container registry access token.')
-param registryPassword string
+@description('Existing Azure Container Registry name.')
+param registryName string
 
 var suffix = uniqueString(subscription().id, resourceGroup().id)
 var storageName = 'stcap${take(suffix, 13)}'
@@ -28,6 +21,29 @@ var jobName = '${namePrefix}-render'
 var blobContributorRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
 var queueContributorRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
 var tableContributorRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
+var acrPullRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+
+resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
+  name: registryName
+}
+
+resource imagePullIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${namePrefix}-image-pull'
+  location: location
+  tags: {
+    application: namePrefix
+  }
+}
+
+resource imagePullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(registry.id, imagePullIdentity.id, acrPullRole)
+  scope: registry
+  properties: {
+    principalId: imagePullIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: acrPullRole
+  }
+}
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageName
@@ -159,7 +175,10 @@ resource web 'Microsoft.App/containerApps@2024-03-01' = {
   name: webName
   location: location
   identity: {
-    type: 'SystemAssigned'
+    type: 'SystemAssigned,UserAssigned'
+    userAssignedIdentities: {
+      '${imagePullIdentity.id}': {}
+    }
   }
   properties: {
     environmentId: environment.id
@@ -173,15 +192,8 @@ resource web 'Microsoft.App/containerApps@2024-03-01' = {
       }
       registries: [
         {
-          server: registryServer
-          username: registryUsername
-          passwordSecretRef: 'registry-password'
-        }
-      ]
-      secrets: [
-        {
-          name: 'registry-password'
-          value: registryPassword
+          server: registry.properties.loginServer
+          identity: imagePullIdentity.id
         }
       ]
     }
@@ -220,13 +232,17 @@ resource web 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
   }
+  dependsOn: [imagePullRole]
 }
 
 resource renderJob 'Microsoft.App/jobs@2024-03-01' = {
   name: jobName
   location: location
   identity: {
-    type: 'SystemAssigned'
+    type: 'SystemAssigned,UserAssigned'
+    userAssignedIdentities: {
+      '${imagePullIdentity.id}': {}
+    }
   }
   properties: {
     environmentId: environment.id
@@ -236,16 +252,11 @@ resource renderJob 'Microsoft.App/jobs@2024-03-01' = {
       replicaRetryLimit: 0
       registries: [
         {
-          server: registryServer
-          username: registryUsername
-          passwordSecretRef: 'registry-password'
+          server: registry.properties.loginServer
+          identity: imagePullIdentity.id
         }
       ]
       secrets: [
-        {
-          name: 'registry-password'
-          value: registryPassword
-        }
         {
           name: 'queue-connection'
           value: 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=core.windows.net'
@@ -301,6 +312,7 @@ resource renderJob 'Microsoft.App/jobs@2024-03-01' = {
       ]
     }
   }
+  dependsOn: [imagePullRole]
 }
 
 resource webBlobRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
