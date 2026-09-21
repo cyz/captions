@@ -177,7 +177,7 @@ The included deployment targets the `devtools` subscription in the `Advocates at
 ./infra/deploy.sh
 ```
 
-The script refuses to deploy if the active subscription does not belong to the expected tenant. The GitHub token is passed as a secure deployment parameter and stored only as a Container Apps registry secret.
+The script refuses to deploy if the active subscription does not belong to the expected tenant. It deploys an immutable image tag derived from the latest application commit. The GitHub token is passed as a secure deployment parameter and stored only as a Container Apps registry secret.
 
 ### Netlify
 

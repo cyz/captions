@@ -5,7 +5,8 @@ readonly SUBSCRIPTION_ID="80714735-1a43-49a8-b34d-5d29fa8d63d9"
 readonly TENANT_ID="5e76cd33-c0f8-4ebc-9413-cfe3e59074ad"
 readonly RESOURCE_GROUP="caption-burner-rg"
 readonly LOCATION="eastus2"
-readonly IMAGE="ghcr.io/cyz/captions:latest"
+image_commit="$(git log -1 --format=%H -- Dockerfile package.json package-lock.json app lib worker next.config.js)"
+readonly IMAGE="ghcr.io/cyz/captions:sha-${image_commit}"
 
 command -v az >/dev/null
 
