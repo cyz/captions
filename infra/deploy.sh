@@ -8,7 +8,6 @@ readonly LOCATION="eastus2"
 readonly IMAGE="ghcr.io/cyz/captions:latest"
 
 command -v az >/dev/null
-command -v gh >/dev/null
 
 az account set --subscription "$SUBSCRIPTION_ID"
 actual_tenant="$(az account show --query tenantId -o tsv)"
@@ -17,7 +16,17 @@ if [[ "$actual_tenant" != "$TENANT_ID" ]]; then
   exit 1
 fi
 
-registry_token="$(gh auth token)"
+if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+  registry_token="$(gh auth token)"
+else
+  credential_payload="$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill)"
+  registry_token="$(printf '%s\n' "$credential_payload" | sed -n 's/^password=//p')"
+  unset credential_payload
+fi
+if [[ -z "$registry_token" ]]; then
+  printf 'No GitHub credential is available for the private container image.\n' >&2
+  exit 1
+fi
 az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
 
 az deployment group create \
@@ -29,3 +38,5 @@ az deployment group create \
     registryPassword="$registry_token" \
   --query 'properties.outputs' \
   --output json
+
+unset registry_token

@@ -48,6 +48,8 @@ export async function processJob(jobId: string): Promise<void> {
   if (!meta || meta.status === "done") return;
 
   const paths = jobPaths(jobId);
+  let progressUpdates = Promise.resolve<unknown>(undefined);
+  let reportedProgress = 0;
   try {
     await updateMeta(jobId, { status: "processing", progress: 0, error: undefined });
 
@@ -79,13 +81,19 @@ export async function processJob(jobId: string): Promise<void> {
       output: paths.output,
       durationMs: meta.video?.durationMs ?? 0,
       onProgress: (percent) => {
-        void updateMeta(jobId, { progress: percent });
+        if (percent < reportedProgress + 5) return;
+        reportedProgress = percent;
+        progressUpdates = progressUpdates.then(() =>
+          updateMeta(jobId, { progress: percent }),
+        );
       },
     });
 
+    await progressUpdates;
     await uploadArtifactFromFile(jobId, "output", paths.output, "video/mp4");
     await updateMeta(jobId, { status: "done", progress: 100 });
   } catch (err) {
+    await progressUpdates.catch(() => undefined);
     await updateMeta(jobId, {
       status: "error",
       error: err instanceof Error ? err.message : String(err),
