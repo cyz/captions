@@ -12,7 +12,31 @@ export const maxDuration = 60;
 const MAX_VIDEO_BYTES = 600 * 1024 * 1024; // 600 MB
 const MAX_DURATION_MS = 10 * 60 * 1000; // 10 min
 
+export function GET() {
+  const supported = process.env.NETLIFY !== "true";
+  return NextResponse.json({
+    status: "ok",
+    uploadSupported: supported,
+    ...(supported
+      ? {}
+      : {
+          reason:
+            "Caption processing requires persistent storage, FFmpeg, and a long-running worker, which are not available in this Netlify deployment.",
+        }),
+  });
+}
+
 export async function POST(req: NextRequest) {
+  if (process.env.NETLIFY === "true") {
+    return NextResponse.json(
+      {
+        error:
+          "Video processing is unavailable on Netlify. Deploy the app to a persistent Node.js server with writable storage and FFmpeg installed.",
+      },
+      { status: 503 },
+    );
+  }
+
   try {
     return await handleUpload(req);
   } catch (error) {

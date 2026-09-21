@@ -141,6 +141,10 @@ This project requires a Node.js server with:
 
 GitHub Pages cannot run this application because it only serves static files. Serverless platforms with ephemeral filesystems or short execution limits will require replacing local storage and the in-process queue with persistent object storage and a background worker.
 
+### Netlify
+
+Netlify can deploy the interface and Next.js route handlers, but the current video-processing backend is not compatible with its serverless runtime. Upload and rendering require persistent storage, FFmpeg and ffprobe binaries, and a worker that continues running after the API response. Use a persistent Node.js or container host, or move storage and rendering to dedicated external services before using Netlify in production.
+
 ## Available Scripts
 
 - `npm run dev` starts the development server
