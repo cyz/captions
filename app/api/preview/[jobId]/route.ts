@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createReadStream } from "fs";
 import { promises as fs } from "fs";
 import { Readable } from "stream";
+import { createArtifactReadUrl } from "@/lib/artifacts";
+import { isAzureStorageEnabled } from "@/lib/azure";
 import { jobPaths } from "@/lib/paths";
 
 export const runtime = "nodejs";
@@ -12,6 +14,9 @@ export async function GET(
   { params }: { params: Promise<{ jobId: string }> },
 ) {
   const { jobId } = await params;
+  if (isAzureStorageEnabled()) {
+    return NextResponse.redirect(await createArtifactReadUrl(jobId, "video"));
+  }
   const videoPath = jobPaths(jobId).video;
   let size: number;
   try {

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createReadStream } from "fs";
 import { promises as fs } from "fs";
 import { Readable } from "stream";
+import { createArtifactReadUrl } from "@/lib/artifacts";
+import { isAzureStorageEnabled } from "@/lib/azure";
 import { jobPaths } from "@/lib/paths";
 import { readMeta } from "@/lib/store";
 
@@ -15,6 +17,10 @@ export async function GET(
   const meta = await readMeta(jobId);
   if (!meta || meta.status !== "done") {
     return NextResponse.json({ error: "Video is not ready yet." }, { status: 404 });
+  }
+
+  if (isAzureStorageEnabled()) {
+    return NextResponse.redirect(await createArtifactReadUrl(jobId, "output"));
   }
 
   const outputPath = jobPaths(jobId).output;

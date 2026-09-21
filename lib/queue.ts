@@ -1,7 +1,13 @@
+import { promises as fs } from "fs";
+import { downloadArtifact, getArtifactSize, uploadArtifactFromFile } from "./artifacts";
+import { getQueueClient, isAzureStorageEnabled } from "./azure";
 import { renderOverlays } from "./overlay";
-import { burnCaptions } from "./ffmpeg";
-import { jobPaths } from "./paths";
+import { burnCaptions, probeVideo } from "./ffmpeg";
+import { ensureJobDir, jobPaths } from "./paths";
 import { readMeta, updateMeta } from "./store";
+
+const MAX_VIDEO_BYTES = 600 * 1024 * 1024;
+const MAX_DURATION_MS = 10 * 60 * 1000;
 
 // Lightweight in-process FIFO queue with a single worker. Structured so it can
 // be swapped for BullMQ/Redis later without touching the API routes.
@@ -15,7 +21,11 @@ const g = globalThis as unknown as { __captionQueue?: QueueState };
 const state: QueueState = g.__captionQueue ?? { pending: [], running: false };
 g.__captionQueue = state;
 
-export function enqueueRender(jobId: string): void {
+export async function enqueueRender(jobId: string): Promise<void> {
+  if (isAzureStorageEnabled()) {
+    await getQueueClient().sendMessage(JSON.stringify({ jobId }));
+    return;
+  }
   if (!state.pending.includes(jobId)) state.pending.push(jobId);
   void drain();
 }
@@ -33,13 +43,26 @@ async function drain(): Promise<void> {
   }
 }
 
-async function processJob(jobId: string): Promise<void> {
+export async function processJob(jobId: string): Promise<void> {
   const meta = await readMeta(jobId);
-  if (!meta) return;
+  if (!meta || meta.status === "done") return;
 
   const paths = jobPaths(jobId);
   try {
     await updateMeta(jobId, { status: "processing", progress: 0, error: undefined });
+
+    if (isAzureStorageEnabled()) {
+      await ensureJobDir(jobId);
+      const size = await getArtifactSize(jobId, "video");
+      if (size > MAX_VIDEO_BYTES) throw new Error("Video exceeds the 600 MB limit.");
+      await downloadArtifact(jobId, "video", paths.video);
+      const video = await probeVideo(paths.video);
+      if (video.durationMs > MAX_DURATION_MS) {
+        throw new Error("Video exceeds the 10-minute limit.");
+      }
+      meta.video = video;
+      await updateMeta(jobId, { video });
+    }
 
     const width = meta.video?.width || 1080;
     const height = meta.video?.height || 1920;
@@ -60,11 +83,16 @@ async function processJob(jobId: string): Promise<void> {
       },
     });
 
+    await uploadArtifactFromFile(jobId, "output", paths.output, "video/mp4");
     await updateMeta(jobId, { status: "done", progress: 100 });
   } catch (err) {
     await updateMeta(jobId, {
       status: "error",
       error: err instanceof Error ? err.message : String(err),
     });
+  } finally {
+    if (isAzureStorageEnabled()) {
+      await fs.rm(paths.dir, { recursive: true, force: true });
+    }
   }
 }

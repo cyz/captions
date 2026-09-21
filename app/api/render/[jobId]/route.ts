@@ -22,7 +22,7 @@ export async function POST(
   }
 
   await updateMeta(jobId, { status: "queued", progress: 0, error: undefined });
-  enqueueRender(jobId);
+  await enqueueRender(jobId);
 
   return NextResponse.json({ status: "queued" });
 }

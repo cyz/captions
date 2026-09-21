@@ -1,8 +1,8 @@
 import path from "path";
 import { promises as fs } from "fs";
 
-// All runtime artifacts live under ./data (gitignored).
-export const DATA_ROOT = path.join(process.cwd(), "data");
+// Azure workers use ephemeral storage; local development keeps ./data.
+export const DATA_ROOT = process.env.DATA_ROOT || path.join(process.cwd(), "data");
 export const JOBS_ROOT = path.join(DATA_ROOT, "jobs");
 
 export function jobDir(jobId: string): string {

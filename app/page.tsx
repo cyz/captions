@@ -11,6 +11,31 @@ export default function UploadPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  function inspectVideo(file: File): Promise<{
+    width: number;
+    height: number;
+    durationMs: number;
+  }> {
+    return new Promise((resolve, reject) => {
+      const element = document.createElement("video");
+      const url = URL.createObjectURL(file);
+      element.preload = "metadata";
+      element.onloadedmetadata = () => {
+        URL.revokeObjectURL(url);
+        resolve({
+          width: element.videoWidth,
+          height: element.videoHeight,
+          durationMs: Math.round(element.duration * 1000),
+        });
+      };
+      element.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("Could not read the selected video."));
+      };
+      element.src = url;
+    });
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -20,6 +45,42 @@ export default function UploadPage() {
     }
     setBusy(true);
     try {
+      const capabilityResponse = await fetch("/api/upload");
+      const capability = await readJsonResponse<{
+        uploadMode: "direct" | "multipart";
+      }>(capabilityResponse);
+
+      if (capability.uploadMode === "direct") {
+        const metadata = await inspectVideo(video);
+        const createResponse = await fetch("/api/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            video: {
+              name: video.name,
+              size: video.size,
+              type: video.type,
+              ...metadata,
+            },
+            srtText: await srt.text(),
+          }),
+        });
+        const created = await readJsonResponse<{
+          jobId: string;
+          upload: { url: string; headers: Record<string, string> };
+        }>(createResponse);
+        const uploadResponse = await fetch(created.upload.url, {
+          method: "PUT",
+          headers: created.upload.headers,
+          body: video,
+        });
+        if (!uploadResponse.ok) {
+          throw new Error(`Video upload failed (${uploadResponse.status}).`);
+        }
+        router.push(`/editor/${created.jobId}`);
+        return;
+      }
+
       const form = new FormData();
       form.append("video", video);
       form.append("srt", srt);
