@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { readJsonResponse } from "@/lib/api-response";
 
 export default function UploadPage() {
   const router = useRouter();
@@ -23,8 +24,7 @@ export default function UploadPage() {
       form.append("video", video);
       form.append("srt", srt);
       const res = await fetch("/api/upload", { method: "POST", body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Upload failed.");
+      const data = await readJsonResponse<{ jobId: string }>(res);
       router.push(`/editor/${data.jobId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unexpected error.");

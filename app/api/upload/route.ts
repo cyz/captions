@@ -13,6 +13,21 @@ const MAX_VIDEO_BYTES = 600 * 1024 * 1024; // 600 MB
 const MAX_DURATION_MS = 10 * 60 * 1000; // 10 min
 
 export async function POST(req: NextRequest) {
+  try {
+    return await handleUpload(req);
+  } catch (error) {
+    console.error("Upload processing failed", error);
+    return NextResponse.json(
+      {
+        error:
+          "Upload processing failed. Verify that the server has writable storage and FFmpeg installed.",
+      },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleUpload(req: NextRequest) {
   const form = await req.formData();
   const video = form.get("video");
   const srt = form.get("srt");

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, use } from "react";
 import SafeZoneOverlay from "@/components/SafeZoneOverlay";
+import { readJsonResponse } from "@/lib/api-response";
 import { Segment, wrapText, validateSegments } from "@/lib/srt";
 import type { VideoInfo } from "@/lib/store";
 
@@ -42,13 +43,21 @@ export default function EditorPage({
 
   useEffect(() => {
     (async () => {
-      const res = await fetch(`/api/segments/${jobId}`);
-      const data = await res.json();
-      if (res.ok) {
+      try {
+        const res = await fetch(`/api/segments/${jobId}`);
+        const data = await readJsonResponse<{
+          segments: Segment[];
+          video?: VideoInfo;
+        }>(res);
         setSegments(data.segments);
         setVideo(data.video ?? null);
+      } catch (err) {
+        setRenderError(
+          err instanceof Error ? err.message : "Failed to load the captions.",
+        );
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     })();
   }, [jobId]);
 
@@ -164,7 +173,13 @@ export default function EditorPage({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ segments }),
       });
-      return res.ok;
+      await readJsonResponse(res);
+      return true;
+    } catch (err) {
+      setRenderError(
+        err instanceof Error ? err.message : "Failed to save the captions.",
+      );
+      return false;
     } finally {
       setSaving(false);
     }
@@ -182,24 +197,33 @@ export default function EditorPage({
       return;
     }
     const res = await fetch(`/api/render/${jobId}`, { method: "POST" });
-    const data = await res.json();
-    if (!res.ok) {
-      setRenderError(data.error || "Failed to start rendering.");
-      return;
-    }
+    await readJsonResponse<{ status: string }>(res);
     setStatus("queued");
     poll();
   }
 
   function poll() {
     const timer = setInterval(async () => {
-      const res = await fetch(`/api/status/${jobId}`);
-      const data = await res.json();
-      setStatus(data.status);
-      setProgress(data.progress ?? 0);
-      if (data.status === "done" || data.status === "error") {
+      try {
+        const res = await fetch(`/api/status/${jobId}`);
+        const data = await readJsonResponse<{
+          status: string;
+          progress?: number;
+          error?: string | null;
+        }>(res);
+        setStatus(data.status);
+        setProgress(data.progress ?? 0);
+        if (data.status === "done" || data.status === "error") {
+          clearInterval(timer);
+          if (data.status === "error") {
+            setRenderError(data.error || "Rendering error.");
+          }
+        }
+      } catch (err) {
         clearInterval(timer);
-        if (data.status === "error") setRenderError(data.error || "Rendering error.");
+        setRenderError(
+          err instanceof Error ? err.message : "Failed to read rendering status.",
+        );
       }
     }, 1000);
   }
