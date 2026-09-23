@@ -7,22 +7,39 @@ export const TARGET_WIDTH = 1080;
 export const TARGET_HEIGHT = 1920;
 export const TARGET_ASPECT = 9 / 16;
 
-// Fractions of frame reserved (kept clear of caption text).
-export const SAFE_ZONE = {
-  // Top band reserved for platform UI / handles.
-  topMargin: 0.10,
-  // Bottom band reserved for username, CTA and caption description.
-  bottomMargin: 0.18,
-  // Right column reserved for like/comment/share icons.
-  rightMargin: 0.12,
-  // Left breathing room.
-  leftMargin: 0.06,
-} as const;
+export type SafeZoneFormat = "social" | "long-form";
 
-// Where the caption block sits vertically, measured as the distance of the
-// caption baseline area from the bottom of the frame (fraction of height).
-// Sits above the reserved bottom band so text never collides with the CTA.
-export const CAPTION_BOTTOM_OFFSET = 0.22;
+export interface SafeZoneProfile {
+  topMargin: number;
+  bottomMargin: number;
+  rightMargin: number;
+  leftMargin: number;
+  captionBottomOffset: number;
+}
+
+export const SAFE_ZONE_PROFILES: Record<SafeZoneFormat, SafeZoneProfile> = {
+  social: {
+    topMargin: 0.1,
+    bottomMargin: 0.18,
+    rightMargin: 0.12,
+    leftMargin: 0.06,
+    captionBottomOffset: 0.22,
+  },
+  "long-form": {
+    topMargin: 0.08,
+    bottomMargin: 0.1,
+    rightMargin: 0.08,
+    leftMargin: 0.08,
+    captionBottomOffset: 0.12,
+  },
+};
+
+export const SAFE_ZONE = SAFE_ZONE_PROFILES.social;
+export const CAPTION_BOTTOM_OFFSET = SAFE_ZONE.captionBottomOffset;
+
+export function getSafeZoneProfile(format: SafeZoneFormat): SafeZoneProfile {
+  return SAFE_ZONE_PROFILES[format];
+}
 
 // Maximum text lines allowed per subtitle segment (hard product rule).
 export const MAX_LINES = 2;
@@ -41,10 +58,12 @@ export interface SafeZoneRect {
 export function getSafeTextRect(
   width = TARGET_WIDTH,
   height = TARGET_HEIGHT,
+  format: SafeZoneFormat = "social",
 ): SafeZoneRect {
-  const x = width * SAFE_ZONE.leftMargin;
-  const y = height * SAFE_ZONE.topMargin;
-  const w = width * (1 - SAFE_ZONE.leftMargin - SAFE_ZONE.rightMargin);
-  const h = height * (1 - SAFE_ZONE.topMargin - SAFE_ZONE.bottomMargin);
+  const safeZone = getSafeZoneProfile(format);
+  const x = width * safeZone.leftMargin;
+  const y = height * safeZone.topMargin;
+  const w = width * (1 - safeZone.leftMargin - safeZone.rightMargin);
+  const h = height * (1 - safeZone.topMargin - safeZone.bottomMargin);
   return { x, y, width: w, height: h };
 }

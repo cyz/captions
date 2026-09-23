@@ -3,6 +3,12 @@ import type { TableEntity, TableEntityResult } from "@azure/data-tables";
 import { Segment } from "./srt";
 import { getTableClient, isAzureStorageEnabled } from "./azure";
 import { ensureJobDir, jobPaths } from "./paths";
+import type { VideoFormat } from "./video-format";
+import {
+  DEFAULT_CAPTION_STYLE,
+  normalizeCaptionStyle,
+  type CaptionStyle,
+} from "./caption-style";
 
 export type JobStatus =
   | "uploaded"
@@ -16,6 +22,7 @@ export interface VideoInfo {
   height: number;
   durationMs: number;
   isVertical916: boolean;
+  format: VideoFormat;
 }
 
 export interface JobMeta {
@@ -27,6 +34,7 @@ export interface JobMeta {
   error?: string;
   video?: VideoInfo;
   segments: Segment[];
+  captionStyle?: CaptionStyle;
 }
 
 interface JobEntity {
@@ -37,6 +45,7 @@ interface JobEntity {
   error?: string;
   videoJson?: string;
   segmentsJson: string;
+  captionStyleJson?: string;
 }
 
 const PARTITION_KEY = "jobs";
@@ -52,6 +61,9 @@ function toEntity(meta: JobMeta): TableEntity<JobEntity> {
     ...(meta.error ? { error: meta.error } : {}),
     ...(meta.video ? { videoJson: JSON.stringify(meta.video) } : {}),
     segmentsJson: JSON.stringify(meta.segments),
+    captionStyleJson: JSON.stringify(
+      normalizeCaptionStyle(meta.captionStyle ?? DEFAULT_CAPTION_STYLE),
+    ),
   };
 }
 
@@ -65,6 +77,9 @@ function fromEntity(entity: TableEntityResult<JobEntity>): JobMeta {
     ...(entity.error ? { error: entity.error } : {}),
     ...(entity.videoJson ? { video: JSON.parse(entity.videoJson) as VideoInfo } : {}),
     segments: JSON.parse(entity.segmentsJson) as Segment[],
+    captionStyle: normalizeCaptionStyle(
+      entity.captionStyleJson ? JSON.parse(entity.captionStyleJson) : undefined,
+    ),
   };
 }
 

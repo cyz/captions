@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Caption Burner — Safe Zone",
+  title: "Caption Studio",
   description:
-    "Burn captions into vertical videos while respecting the safe zone.",
+    "Review and apply captions to social and long-form videos.",
 };
 
 export default function RootLayout({
@@ -13,10 +13,22 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className="min-h-screen bg-neutral-950 text-neutral-100 antialiased">
-        {children}
-      </body>
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(() => {
+  const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+  const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  document.documentElement.setAttribute("data-theme", theme);
+})();
+if (!new URLSearchParams(window.location.search).has("clawpilotTheme")) {
+  document.documentElement.setAttribute("data-theme", "light");
+}`,
+          }}
+        />
+      </head>
+      <body>{children}</body>
     </html>
   );
 }

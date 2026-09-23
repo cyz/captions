@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readMeta, updateMeta } from "@/lib/store";
 import { Segment, validateSegments } from "@/lib/srt";
+import { normalizeCaptionStyle } from "@/lib/caption-style";
 
 export const runtime = "nodejs";
 
@@ -11,7 +12,11 @@ export async function GET(
   const { jobId } = await params;
   const meta = await readMeta(jobId);
   if (!meta) return NextResponse.json({ error: "Job not found." }, { status: 404 });
-  return NextResponse.json({ segments: meta.segments, video: meta.video });
+  return NextResponse.json({
+    segments: meta.segments,
+    video: meta.video,
+    captionStyle: normalizeCaptionStyle(meta.captionStyle),
+  });
 }
 
 export async function PUT(
@@ -36,7 +41,8 @@ export async function PUT(
   }));
 
   const issues = validateSegments(segments);
-  await updateMeta(jobId, { segments });
+  const captionStyle = normalizeCaptionStyle(body.captionStyle ?? meta.captionStyle);
+  await updateMeta(jobId, { segments, captionStyle });
 
-  return NextResponse.json({ segments, issues });
+  return NextResponse.json({ segments, issues, captionStyle });
 }

@@ -7,6 +7,7 @@ import { isAzureStorageEnabled } from "@/lib/azure";
 import { parseSrt } from "@/lib/srt";
 import { probeVideo } from "@/lib/ffmpeg";
 import { JobMeta, VideoInfo, writeMeta } from "@/lib/store";
+import { classifyVideoFormat } from "@/lib/video-format";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -116,6 +117,7 @@ async function handleAzureUpload(req: NextRequest) {
     height,
     durationMs,
     isVertical916: Math.abs(width / height - 9 / 16) < 0.02,
+    format: classifyVideoFormat(width, height),
   };
   const jobId = randomUUID();
   const now = Date.now();

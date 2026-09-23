@@ -1,4 +1,5 @@
-import { promises as fs } from "fs";
+import { createReadStream, promises as fs } from "fs";
+import { Readable } from "stream";
 import {
   BlobSASPermissions,
   SASProtocol,
@@ -133,4 +134,40 @@ export async function uploadArtifactFromFile(
   await client.uploadFile(source, {
     blobHTTPHeaders: { blobContentType: contentType },
   });
+}
+
+export async function openArtifactDownload(
+  jobId: string,
+  artifact: JobArtifact,
+): Promise<{ stream: Readable; contentLength?: number }> {
+  if (!isAzureStorageEnabled()) {
+    const path = localPath(jobId, artifact);
+    return {
+      stream: createReadStream(path),
+      contentLength: (await fs.stat(path)).size,
+    };
+  }
+
+  const client = getContainerClient().getBlockBlobClient(blobName(jobId, artifact));
+  const response = await client.download();
+  if (!(response.readableStreamBody instanceof Readable)) {
+    throw new Error(`Blob ${artifact} has no readable body.`);
+  }
+  return {
+    stream: response.readableStreamBody,
+    contentLength: response.contentLength,
+  };
+}
+
+export async function deleteArtifact(
+  jobId: string,
+  artifact: JobArtifact,
+): Promise<void> {
+  if (!isAzureStorageEnabled()) {
+    await fs.rm(localPath(jobId, artifact), { force: true });
+    return;
+  }
+
+  const client = getContainerClient().getBlockBlobClient(blobName(jobId, artifact));
+  await client.deleteIfExists({ deleteSnapshots: "include" });
 }

@@ -1,52 +1,83 @@
 "use client";
 
-import { SAFE_ZONE, CAPTION_BOTTOM_OFFSET } from "@/lib/safezone";
+import {
+  getSafeZoneProfile,
+  type SafeZoneFormat,
+} from "@/lib/safezone";
+import {
+  DEFAULT_CAPTION_STYLE,
+  type CaptionStyle,
+} from "@/lib/caption-style";
 
-// Visual guides drawn over the preview video: the safe text rectangle plus the
-// reserved bottom band. Percent-based so it scales with the video element.
-export default function SafeZoneOverlay({ caption }: { caption?: string }) {
-  const top = SAFE_ZONE.topMargin * 100;
-  const bottom = SAFE_ZONE.bottomMargin * 100;
-  const left = SAFE_ZONE.leftMargin * 100;
-  const right = SAFE_ZONE.rightMargin * 100;
+// Percent-based preview overlay that scales with the video element.
+export default function SafeZoneOverlay({
+  caption,
+  format = "social",
+  showGuides = true,
+  captionStyle = DEFAULT_CAPTION_STYLE,
+}: {
+  caption?: string;
+  format?: SafeZoneFormat;
+  showGuides?: boolean;
+  captionStyle?: CaptionStyle;
+}) {
+  const safeZone = getSafeZoneProfile(format);
+  const top = safeZone.topMargin * 100;
+  const left = safeZone.leftMargin * 100;
+  const right = safeZone.rightMargin * 100;
 
   return (
     <div className="pointer-events-none absolute inset-0">
-      {/* Safe text rectangle */}
-      <div
-        className="absolute rounded-sm border border-dashed border-emerald-400/70"
-        style={{
-          top: `${top}%`,
-          bottom: `${bottom}%`,
-          left: `${left}%`,
-          right: `${right}%`,
-        }}
-      />
-      {/* Reserved bottom band */}
-      <div
-        className="absolute inset-x-0 bottom-0 bg-red-500/10"
-        style={{ height: `${bottom}%` }}
-      />
-      {/* Reserved top band */}
-      <div
-        className="absolute inset-x-0 top-0 bg-red-500/10"
-        style={{ height: `${top}%` }}
-      />
-      {/* Live caption preview positioned at the caption baseline */}
-      {caption && (
+      {showGuides && (
         <div
-          className="absolute"
+          className="safe-zone-border absolute"
           style={{
-            bottom: `${CAPTION_BOTTOM_OFFSET * 100}%`,
+            top: `${top}%`,
+            bottom: `${safeZone.bottomMargin * 100}%`,
             left: `${left}%`,
             right: `${right}%`,
           }}
+        />
+      )}
+      {/* Live caption preview positioned at the caption baseline */}
+      {caption && (
+        <div
+          className="caption-preview-position absolute"
+          style={{
+            top: `${captionStyle.verticalPosition}%`,
+            left: `${left}%`,
+            right: `${right}%`,
+            transform: "translateY(-100%)",
+          }}
         >
-          <div className="rounded bg-black/90 px-2 py-1 text-center">
+          <div
+            className={`caption-preview ${captionStyle.preset}`}
+            style={{
+              color: captionStyle.textColor,
+              background: captionStyle.backgroundEnabled
+                ? `color-mix(in srgb, ${captionStyle.backgroundColor} ${
+                    captionStyle.backgroundOpacity * 100
+                  }%, transparent)`
+                : "transparent",
+              fontFamily: captionStyle.fontFamily,
+              fontWeight: captionStyle.fontWeight,
+              fontSize: `clamp(11px, ${captionStyle.fontSize / 38}vw, ${
+                captionStyle.fontSize / 3
+              }px)`,
+              textAlign: captionStyle.alignment,
+              WebkitTextStroke:
+                captionStyle.outlineWidth > 0
+                  ? `${Math.max(0.5, captionStyle.outlineWidth / 4)}px ${
+                      captionStyle.outlineColor
+                    }`
+                  : undefined,
+              textTransform: captionStyle.uppercase ? "uppercase" : "none",
+            }}
+          >
             {caption.split("\n").map((line, i) => (
               <div
                 key={i}
-                className="text-center text-lg font-bold leading-tight text-white"
+                className="caption-preview-line"
               >
                 {line}
               </div>

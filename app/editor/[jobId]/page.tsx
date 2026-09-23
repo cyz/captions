@@ -1,26 +1,47 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, use } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import CaptionStylePanel from "@/components/editor/CaptionStylePanel";
+import CaptionTimeline from "@/components/editor/CaptionTimeline";
 import SafeZoneOverlay from "@/components/SafeZoneOverlay";
 import { readJsonResponse } from "@/lib/api-response";
-import { Segment, wrapText, validateSegments } from "@/lib/srt";
+import {
+  DEFAULT_CAPTION_STYLE,
+  normalizeCaptionStyle,
+  type CaptionStyle,
+} from "@/lib/caption-style";
+import { Segment, validateSegments, wrapText } from "@/lib/srt";
 import type { VideoInfo } from "@/lib/store";
+import {
+  classifyVideoFormat,
+  type VideoFormat,
+} from "@/lib/video-format";
+
+type EditorTool = "style" | "captions";
 
 function msToInput(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  const mm = String(Math.floor(s / 60)).padStart(2, "0");
-  const ss = String(s % 60).padStart(2, "0");
+  const seconds = Math.floor(ms / 1000);
+  const minutes = String(Math.floor(seconds / 60)).padStart(2, "0");
+  const remainder = String(seconds % 60).padStart(2, "0");
   const millis = String(ms % 1000).padStart(3, "0");
-  return `${mm}:${ss}.${millis}`;
+  return `${minutes}:${remainder}.${millis}`;
+}
+
+function compactTime(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(
+    seconds % 60,
+  ).padStart(2, "0")}`;
 }
 
 function inputToMs(value: string): number {
-  const m = /^(\d+):(\d{1,2})(?:\.(\d{1,3}))?$/.exec(value.trim());
-  if (!m) return NaN;
-  const mm = parseInt(m[1], 10);
-  const ss = parseInt(m[2], 10);
-  const millis = m[3] ? parseInt(m[3].padEnd(3, "0"), 10) : 0;
-  return mm * 60000 + ss * 1000 + millis;
+  const match = /^(\d+):(\d{1,2})(?:\.(\d{1,3}))?$/.exec(value.trim());
+  if (!match) return Number.NaN;
+  return (
+    Number.parseInt(match[1], 10) * 60000 +
+    Number.parseInt(match[2], 10) * 1000 +
+    (match[3] ? Number.parseInt(match[3].padEnd(3, "0"), 10) : 0)
+  );
 }
 
 export default function EditorPage({
@@ -30,30 +51,40 @@ export default function EditorPage({
 }) {
   const { jobId } = use(params);
   const videoRef = useRef<HTMLVideoElement>(null);
-
   const [segments, setSegments] = useState<Segment[]>([]);
   const [video, setVideo] = useState<VideoInfo | null>(null);
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyle>({
+    ...DEFAULT_CAPTION_STYLE,
+  });
   const [currentMs, setCurrentMs] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [activeTool, setActiveTool] = useState<EditorTool | null>("style");
+  const [showSafeZone, setShowSafeZone] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
-  const [renderError, setRenderError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    (async () => {
+    void (async () => {
       try {
-        const res = await fetch(`/api/segments/${jobId}`);
+        const response = await fetch(`/api/segments/${jobId}`);
         const data = await readJsonResponse<{
           segments: Segment[];
           video?: VideoInfo;
-        }>(res);
+          captionStyle?: CaptionStyle;
+        }>(response);
         setSegments(data.segments);
         setVideo(data.video ?? null);
-      } catch (err) {
-        setRenderError(
-          err instanceof Error ? err.message : "Failed to load the captions.",
+        setCaptionStyle(normalizeCaptionStyle(data.captionStyle));
+        setSelectedIndex(data.segments[0]?.index ?? null);
+      } catch (loadError) {
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Could not load the project.",
         );
       } finally {
         setLoading(false);
@@ -64,120 +95,158 @@ export default function EditorPage({
   const issues = useMemo(() => validateSegments(segments), [segments]);
   const issueMap = useMemo(() => {
     const map = new Map<number, string[]>();
-    for (const it of issues) map.set(it.index, it.errors);
+    for (const issue of issues) map.set(issue.index, issue.errors);
     return map;
   }, [issues]);
-
-  const activeCaption = useMemo(() => {
-    // Show the caption under the playhead during playback; otherwise show the
-    // segment the user clicked so it appears on screen while editing.
-    const timeSeg = segments.find(
-      (s) => currentMs >= s.start && currentMs <= s.end,
+  const format: VideoFormat =
+    video?.format ??
+    (video ? classifyVideoFormat(video.width, video.height) : "social");
+  const activeSegment = useMemo(() => {
+    const timed = segments.find(
+      (segment) => currentMs >= segment.start && currentMs <= segment.end,
     );
-    const seg =
-      timeSeg ??
-      (selectedIndex != null
-        ? segments.find((s) => s.index === selectedIndex)
-        : undefined);
-    if (!seg) return "";
-    return wrapText(seg.text).lines.join("\n");
-  }, [segments, currentMs, selectedIndex]);
+    const selected = segments.find(
+      (segment) => segment.index === selectedIndex,
+    );
+    return isPlaying ? timed : selected ?? timed;
+  }, [currentMs, isPlaying, segments, selectedIndex]);
+  const activeCaption = activeSegment
+    ? wrapText(activeSegment.text).lines.join("\n")
+    : "";
 
   const updateSegment = useCallback(
     (index: number, patch: Partial<Segment>) => {
-      setSegments((prev) =>
-        prev.map((s) => (s.index === index ? { ...s, ...patch } : s)),
+      setSegments((current) =>
+        current.map((segment) =>
+          segment.index === index ? { ...segment, ...patch } : segment,
+        ),
       );
     },
     [],
   );
 
-  // Select a segment: show its caption and jump the video to the exact instant
-  // the caption appears (paused), landing just inside the segment window.
-  const selectSegment = useCallback((seg: Segment) => {
-    setSelectedIndex(seg.index);
-    setCurrentMs(seg.start);
-    const v = videoRef.current;
-    if (v) {
-      v.pause();
-      const nudge = Math.min(60, Math.max(0, (seg.end - seg.start) / 3));
-      v.currentTime = (seg.start + nudge) / 1000;
-    }
+  const seek = useCallback((milliseconds: number) => {
+    const next = Math.max(0, milliseconds);
+    setCurrentMs(next);
+    if (videoRef.current) videoRef.current.currentTime = next / 1000;
   }, []);
 
-  // Break the text into two balanced lines at the nearest word boundary so it
-  // stays within the two-line safe-zone pattern.
+  const selectSegment = useCallback(
+    (segment: Segment) => {
+      setSelectedIndex(segment.index);
+      const nudge = Math.min(60, Math.max(0, (segment.end - segment.start) / 3));
+      videoRef.current?.pause();
+      seek(segment.start + nudge);
+    },
+    [seek],
+  );
+
+  const togglePlayback = useCallback(() => {
+    const player = videoRef.current;
+    if (!player) return;
+    if (player.paused) void player.play();
+    else player.pause();
+  }, []);
+
   const breakIntoTwoLines = useCallback(
-    (seg: Segment) => {
-      const raw = seg.text.replace(/\s+/g, " ").trim();
+    (segment: Segment) => {
+      const raw = segment.text.replace(/\s+/g, " ").trim();
       if (!raw.includes(" ")) return;
-      const mid = Math.floor(raw.length / 2);
-      const before = raw.lastIndexOf(" ", mid);
-      const after = raw.indexOf(" ", mid + 1);
-      let split = before;
-      if (before === -1) split = after;
-      else if (after !== -1 && after - mid < mid - before) split = after;
+      const middle = Math.floor(raw.length / 2);
+      const before = raw.lastIndexOf(" ", middle);
+      const after = raw.indexOf(" ", middle + 1);
+      const split =
+        before === -1
+          ? after
+          : after !== -1 && after - middle < middle - before
+            ? after
+            : before;
       if (split <= 0) return;
-      const next = `${raw.slice(0, split)}\n${raw.slice(split + 1)}`;
-      updateSegment(seg.index, { text: next });
+      updateSegment(segment.index, {
+        text: `${raw.slice(0, split)}\n${raw.slice(split + 1)}`,
+      });
     },
     [updateSegment],
   );
 
-  // Split a caption into two captions across time (useful when text would need
-  // three lines). Splits at the manual break if present, else at the middle
-  // word, and divides the time window proportionally to each part's length.
-  const splitInTime = useCallback((seg: Segment) => {
-    const text = seg.text.replace(/\r/g, "");
+  const splitInTime = useCallback((segment: Segment) => {
+    const text = segment.text.replace(/\r/g, "");
     let firstText: string;
     let secondText: string;
+
     if (text.includes("\n")) {
-      const idx = text.indexOf("\n");
-      firstText = text.slice(0, idx).replace(/\s+/g, " ").trim();
-      secondText = text.slice(idx + 1).replace(/\s+/g, " ").trim();
+      const breakIndex = text.indexOf("\n");
+      firstText = text.slice(0, breakIndex).replace(/\s+/g, " ").trim();
+      secondText = text.slice(breakIndex + 1).replace(/\s+/g, " ").trim();
     } else {
       const flat = text.replace(/\s+/g, " ").trim();
-      const mid = Math.floor(flat.length / 2);
-      const before = flat.lastIndexOf(" ", mid);
-      const after = flat.indexOf(" ", mid + 1);
-      let split = before;
-      if (before === -1) split = after;
-      else if (after !== -1 && after - mid < mid - before) split = after;
+      const middle = Math.floor(flat.length / 2);
+      const before = flat.lastIndexOf(" ", middle);
+      const after = flat.indexOf(" ", middle + 1);
+      const split =
+        before === -1
+          ? after
+          : after !== -1 && after - middle < middle - before
+            ? after
+            : before;
       if (split <= 0) return;
       firstText = flat.slice(0, split).trim();
       secondText = flat.slice(split + 1).trim();
     }
+
     if (!firstText || !secondText) return;
 
-    const dur = seg.end - seg.start;
+    const duration = segment.end - segment.start;
     const ratio = firstText.length / (firstText.length + secondText.length);
-    const mid = Math.round(seg.start + dur * ratio);
-    const first: Segment = { index: 0, start: seg.start, end: mid, text: firstText };
-    const second: Segment = { index: 0, start: mid, end: seg.end, text: secondText };
+    const midpoint = Math.round(segment.start + duration * ratio);
 
-    setSegments((prev) => {
-      const out: Segment[] = [];
-      for (const s of prev) {
-        if (s.index === seg.index) out.push(first, second);
-        else out.push(s);
+    setSegments((current) => {
+      const next: Segment[] = [];
+      for (const currentSegment of current) {
+        if (currentSegment.index === segment.index) {
+          next.push(
+            {
+              index: 0,
+              start: segment.start,
+              end: midpoint,
+              text: firstText,
+            },
+            {
+              index: 0,
+              start: midpoint,
+              end: segment.end,
+              text: secondText,
+            },
+          );
+        } else {
+          next.push(currentSegment);
+        }
       }
-      return out.map((s, i) => ({ ...s, index: i + 1 }));
+      return next.map((currentSegment, index) => ({
+        ...currentSegment,
+        index: index + 1,
+      }));
     });
-  }, []);
+    setSelectedIndex(segment.index);
+    seek(segment.start);
+  }, [seek]);
 
   async function save(): Promise<boolean> {
     setSaving(true);
+    setError(null);
     try {
-      const res = await fetch(`/api/segments/${jobId}`, {
+      const response = await fetch(`/api/segments/${jobId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ segments }),
+        body: JSON.stringify({ segments, captionStyle }),
       });
-      await readJsonResponse(res);
+      await readJsonResponse(response);
       return true;
-    } catch (err) {
-      setRenderError(
-        err instanceof Error ? err.message : "Failed to save the captions.",
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Could not save the project.",
       );
       return false;
     } finally {
@@ -186,214 +255,379 @@ export default function EditorPage({
   }
 
   async function startRender() {
-    setRenderError(null);
+    setError(null);
     if (issues.length > 0) {
-      setRenderError("Fix the highlighted segments before finishing.");
+      setError("Review the highlighted segments before exporting.");
+      setActiveTool("captions");
       return;
     }
-    const ok = await save();
-    if (!ok) {
-      setRenderError("Failed to save the captions.");
-      return;
+    if (!(await save())) return;
+    try {
+      const response = await fetch(`/api/render/${jobId}`, { method: "POST" });
+      await readJsonResponse(response);
+      setStatus("queued");
+      pollRender();
+    } catch (renderError) {
+      setError(
+        renderError instanceof Error
+          ? renderError.message
+          : "Could not start the export.",
+      );
     }
-    const res = await fetch(`/api/render/${jobId}`, { method: "POST" });
-    await readJsonResponse<{ status: string }>(res);
-    setStatus("queued");
-    poll();
   }
 
-  function poll() {
-    const timer = setInterval(async () => {
+  function pollRender() {
+    const timer = window.setInterval(async () => {
       try {
-        const res = await fetch(`/api/status/${jobId}`);
+        const response = await fetch(`/api/status/${jobId}`);
         const data = await readJsonResponse<{
           status: string;
           progress?: number;
           error?: string | null;
-        }>(res);
+        }>(response);
         setStatus(data.status);
         setProgress(data.progress ?? 0);
         if (data.status === "done" || data.status === "error") {
-          clearInterval(timer);
+          window.clearInterval(timer);
           if (data.status === "error") {
-            setRenderError(data.error || "Rendering error.");
+            setError(data.error || "An error occurred during export.");
           }
         }
-      } catch (err) {
-        clearInterval(timer);
-        setRenderError(
-          err instanceof Error ? err.message : "Failed to read rendering status.",
+      } catch (pollError) {
+        window.clearInterval(timer);
+        setError(
+          pollError instanceof Error
+            ? pollError.message
+            : "Could not read the export status.",
         );
       }
     }, 1000);
   }
 
   if (loading) {
-    return <main className="p-8 text-sm text-neutral-400">Loading…</main>;
+    return (
+      <main className="editor-loading">
+        <span className="spinner" />
+        Preparing your review workspace…
+      </main>
+    );
   }
 
   return (
-    <main className="mx-auto grid max-w-6xl gap-8 px-6 py-10 lg:grid-cols-[360px_1fr]">
-      {/* Preview */}
-      <section className="lg:sticky lg:top-10 lg:self-start">
-        <div className="relative mx-auto aspect-[9/16] w-full max-w-[320px] overflow-hidden rounded-xl bg-black">
-          <video
-            ref={videoRef}
-            src={`/api/preview/${jobId}`}
-            controls
-            className="h-full w-full object-contain"
-            onTimeUpdate={(e) =>
-              setCurrentMs(Math.round(e.currentTarget.currentTime * 1000))
+    <main className="studio-editor">
+      <header className="studio-topbar">
+        <a href="/" className="studio-home" aria-label="Back to home">⌂</a>
+        <div className="studio-project-title">
+          <strong>Caption Studio</strong>
+          <span>project-{jobId.slice(0, 6)}.mp4</span>
+        </div>
+        <div className="studio-top-actions">
+          <span className={`save-indicator ${saving ? "busy" : ""}`}>
+            {saving ? "Saving…" : "Local changes"}
+          </span>
+          <button type="button" onClick={() => void save()} className="studio-save">
+            Save
+          </button>
+          <button
+            type="button"
+            onClick={() => void startRender()}
+            disabled={status === "queued" || status === "processing"}
+            className="studio-export"
+          >
+            Export
+          </button>
+        </div>
+      </header>
+
+      {error && <div className="studio-error" role="alert">{error}</div>}
+      {status && status !== "done" && (
+        <div className="studio-render-progress">
+          <span>Renderizando {progress}%</span>
+          <i style={{ width: `${progress}%` }} />
+        </div>
+      )}
+      {status === "done" && (
+        <a className="studio-download" href={`/api/download/${jobId}`}>
+          Video ready — download file
+        </a>
+      )}
+
+      <div
+        className={`studio-body ${
+          activeTool ? "sidebar-open" : "sidebar-closed"
+        }`}
+      >
+        <nav className="studio-rail" aria-label="Editor tools">
+          <button
+            type="button"
+            className={activeTool === "style" ? "active" : ""}
+            onClick={() =>
+              setActiveTool((current) => (current === "style" ? null : "style"))
             }
-          />
-          <SafeZoneOverlay caption={activeCaption} />
-        </div>
-        {video && (
-          <p className="mt-3 text-center text-xs text-neutral-500">
-            {video.width}×{video.height}
-            {video.isVertical916 ? " · 9:16 ✓" : " · not 9:16 ⚠"}
-          </p>
-        )}
-      </section>
-
-      {/* Editor */}
-      <section>
-        <div className="mb-4 flex items-center justify-between">
-          <h1 className="text-lg font-semibold">Edit captions</h1>
-          <div className="flex gap-2">
-            <button
-              onClick={save}
-              disabled={saving}
-              className="rounded-md border border-neutral-700 px-3 py-1.5 text-sm hover:bg-neutral-800 disabled:opacity-50"
+            title="Style"
+          >
+            ◩
+          </button>
+          <button
+            type="button"
+            className={activeTool === "captions" ? "active" : ""}
+            onClick={() =>
+              setActiveTool((current) =>
+                current === "captions" ? null : "captions",
+              )
+            }
+            title="Captions"
+          >
+            CC
+          </button>
+          <button
+            type="button"
+            className={showSafeZone ? "active-soft" : ""}
+            onClick={() => setShowSafeZone((current) => !current)}
+            aria-label="Toggle safe zone"
+            aria-pressed={showSafeZone}
+            title="Safe zone"
+          >
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.75"
             >
-              {saving ? "Saving…" : "Save"}
-            </button>
-            <button
-              onClick={startRender}
-              disabled={status === "processing" || status === "queued"}
-              className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-semibold hover:bg-indigo-500 disabled:opacity-50"
-            >
-              Finish and render
-            </button>
-          </div>
-        </div>
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <rect
+                x="6.5"
+                y="7"
+                width="11"
+                height="10"
+                rx="1"
+                strokeDasharray="2 2"
+              />
+            </svg>
+          </button>
+          <span className="rail-spacer" />
+          <span className={`format-rail-badge ${format}`}>
+            {format === "long-form" ? "16:9" : "9:16"}
+          </span>
+        </nav>
 
-        {renderError && <p className="mb-4 text-sm text-red-400">{renderError}</p>}
-
-        {status && (
-          <div className="mb-6 rounded-md border border-neutral-800 bg-neutral-900 p-4">
-            {status === "done" ? (
-              <a
-                href={`/api/download/${jobId}`}
-                className="inline-block rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold hover:bg-emerald-500"
-              >
-                Download video with captions
-              </a>
+        {activeTool && (
+          <aside className="studio-sidebar">
+            {activeTool === "style" ? (
+              <CaptionStylePanel
+                style={captionStyle}
+                onChange={setCaptionStyle}
+              />
             ) : (
-              <div>
-                <p className="text-sm capitalize text-neutral-300">
-                  {status}… {progress}%
-                </p>
-                <div className="mt-2 h-2 w-full overflow-hidden rounded bg-neutral-800">
-                  <div
-                    className="h-full bg-indigo-500 transition-all"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
+              <div className="segments-side-panel">
+              <div className="side-panel-heading">
+                <span>CAPTIONS</span>
+                <h2>{segments.length} segments</h2>
               </div>
-            )}
-          </div>
-        )}
-
-        <ul className="space-y-3">
-          {segments.map((seg) => {
-            const errs = issueMap.get(seg.index) ?? [];
-            const { lines, overflow } = wrapText(seg.text);
-            const selected = selectedIndex === seg.index;
-            return (
-              <li
-                key={seg.index}
-                onClick={() => selectSegment(seg)}
-                className={`cursor-pointer rounded-md border p-3 transition-colors ${
-                  errs.length
-                    ? "border-red-500/60 bg-red-500/5"
-                    : selected
-                      ? "border-indigo-500 bg-indigo-500/5"
-                      : "border-neutral-800 hover:border-neutral-700"
+              <div
+                className={`side-validation ${
+                  issues.length ? "has-errors" : ""
                 }`}
               >
-                <div className="mb-2 flex items-center gap-2 text-xs text-neutral-400">
-                  <span className="font-mono">#{seg.index}</span>
-                  <input
-                    defaultValue={msToInput(seg.start)}
-                    onClick={(e) => e.stopPropagation()}
-                    onBlur={(e) => {
-                      const ms = inputToMs(e.target.value);
-                      if (!Number.isNaN(ms)) updateSegment(seg.index, { start: ms });
-                    }}
-                    className="w-24 rounded bg-neutral-900 px-2 py-1 font-mono text-neutral-200"
-                  />
-                  <span>→</span>
-                  <input
-                    defaultValue={msToInput(seg.end)}
-                    onClick={(e) => e.stopPropagation()}
-                    onBlur={(e) => {
-                      const ms = inputToMs(e.target.value);
-                      if (!Number.isNaN(ms)) updateSegment(seg.index, { end: ms });
-                    }}
-                    className="w-24 rounded bg-neutral-900 px-2 py-1 font-mono text-neutral-200"
-                  />
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      selectSegment(seg);
-                    }}
-                    className="ml-auto rounded px-2 py-1 hover:bg-neutral-800"
-                  >
-                    ▶ show on screen
-                  </button>
-                </div>
-                <textarea
-                  value={seg.text}
-                  onFocus={() => selectSegment(seg)}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => updateSegment(seg.index, { text: e.target.value })}
-                  rows={2}
-                  className="w-full resize-none rounded bg-neutral-900 p-2 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-                <div className="mt-1 flex items-center justify-between gap-2 text-xs">
-                  <span className={overflow ? "text-red-400" : "text-neutral-500"}>
-                    {lines.length}/2 lines
-                  </span>
-                  <div className="flex items-center gap-2">
-                    {errs.length > 0 && (
-                      <span className="text-red-400">{errs.join(" ")}</span>
-                    )}
+                {issues.length ? `${issues.length} to review` : "✓ All clear"}
+              </div>
+              <div className="side-segment-list">
+                {segments.map((segment) => {
+                  const segmentIssues = issueMap.get(segment.index) ?? [];
+                  return (
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        breakIntoTwoLines(seg);
-                      }}
-                      className="rounded border border-neutral-700 px-2 py-1 text-neutral-300 hover:bg-neutral-800"
+                      key={segment.index}
+                      type="button"
+                      className={`side-segment ${
+                        selectedIndex === segment.index ? "active" : ""
+                      } ${segmentIssues.length ? "has-errors" : ""}`}
+                      onClick={() => selectSegment(segment)}
                     >
-                      ↵ Break line
+                      <span>
+                        #{String(segment.index).padStart(2, "0")}
+                        <small>{compactTime(segment.start)}</small>
+                      </span>
+                      <strong>{segment.text}</strong>
                     </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        splitInTime(seg);
-                      }}
-                      className="rounded border border-neutral-700 px-2 py-1 text-neutral-300 hover:bg-neutral-800"
-                    >
-                      ✂ Split in time
-                    </button>
-                  </div>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                  );
+                })}
+              </div>
+              </div>
+            )}
+          </aside>
+        )}
+
+        <section className="studio-canvas">
+          <div className="canvas-toolbar">
+            <div className="ratio-switcher">
+              <button
+                type="button"
+                className={format === "long-form" ? "active" : ""}
+                disabled
+              >
+                ▭
+              </button>
+              <button
+                type="button"
+                className={format === "social" ? "active" : ""}
+                disabled
+              >
+                ▯
+              </button>
+            </div>
+            <label className="canvas-safe-toggle">
+              <input
+                type="checkbox"
+                checked={showSafeZone}
+                onChange={(event) => setShowSafeZone(event.target.checked)}
+              />
+              Safe zone
+            </label>
+          </div>
+
+          <div className={`canvas-video-area ${format}`}>
+            <div
+              className="studio-video-frame"
+              style={{
+                aspectRatio: video
+                  ? `${video.width} / ${video.height}`
+                  : "9 / 16",
+              }}
+            >
+              <video
+                ref={videoRef}
+                src={`/api/preview/${jobId}`}
+                className="studio-video"
+                onPlay={() => setIsPlaying(true)}
+                onPause={() => setIsPlaying(false)}
+                onEnded={() => setIsPlaying(false)}
+                onTimeUpdate={(event) =>
+                  setCurrentMs(Math.round(event.currentTarget.currentTime * 1000))
+                }
+              />
+              <SafeZoneOverlay
+                caption={activeCaption}
+                format={format}
+                showGuides={showSafeZone}
+                captionStyle={captionStyle}
+              />
+            </div>
+          </div>
+
+          <div className="playback-bar">
+            <span>
+              {compactTime(currentMs)} / {compactTime(video?.durationMs ?? 0)}
+            </span>
+            <div>
+              <button type="button" onClick={() => seek(currentMs - 5000)}>↶ 5</button>
+              <button
+                type="button"
+                className="play-button"
+                onClick={togglePlayback}
+                aria-label={isPlaying ? "Pause" : "Play"}
+              >
+                {isPlaying ? "Ⅱ" : "▶"}
+              </button>
+              <button type="button" onClick={() => seek(currentMs + 5000)}>5 ↷</button>
+            </div>
+            <span>
+              {video?.width ?? 0} × {video?.height ?? 0}
+            </span>
+          </div>
+        </section>
+
+        <CaptionTimeline
+          segments={segments}
+          durationMs={video?.durationMs ?? 0}
+          currentMs={currentMs}
+          selectedIndex={selectedIndex}
+          onSelect={selectSegment}
+        />
+      </div>
+
+      <section className="studio-edit-strip">
+        <div className="segment-editor-toolbar">
+          <div>
+            <button
+              type="button"
+              className="active"
+              onClick={() => setActiveTool("captions")}
+            >
+              ✎ Edit caption
+            </button>
+            <span>
+              {activeSegment
+                ? `Segment #${String(activeSegment.index).padStart(2, "0")}`
+                : "Select a segment"}
+            </span>
+          </div>
+          {activeSegment && (
+            <div className="segment-editor-actions">
+              <button
+                type="button"
+                onClick={() => breakIntoTwoLines(activeSegment)}
+              >
+                ↵ Break line
+              </button>
+              <button
+                type="button"
+                onClick={() => splitInTime(activeSegment)}
+              >
+                ✂ Split timing
+              </button>
+            </div>
+          )}
+        </div>
+
+        {activeSegment && (
+          <div className="inline-segment-editor">
+            <div className="inline-timing">
+              <input
+                key={`start-${activeSegment.index}-${activeSegment.start}`}
+                defaultValue={msToInput(activeSegment.start)}
+                onBlur={(event) => {
+                  const next = inputToMs(event.target.value);
+                  if (!Number.isNaN(next)) {
+                    updateSegment(activeSegment.index, { start: next });
+                  }
+                }}
+                aria-label="Caption start"
+              />
+              <span>→</span>
+              <input
+                key={`end-${activeSegment.index}-${activeSegment.end}`}
+                defaultValue={msToInput(activeSegment.end)}
+                onBlur={(event) => {
+                  const next = inputToMs(event.target.value);
+                  if (!Number.isNaN(next)) {
+                    updateSegment(activeSegment.index, { end: next });
+                  }
+                }}
+                aria-label="Caption end"
+              />
+            </div>
+            <textarea
+              value={activeSegment.text}
+              onFocus={() => selectSegment(activeSegment)}
+              onChange={(event) =>
+                updateSegment(activeSegment.index, { text: event.target.value })
+              }
+              rows={2}
+              aria-label="Selected caption text"
+            />
+            <span
+              className={
+                issueMap.has(activeSegment.index) ? "inline-issue error" : "inline-issue"
+              }
+            >
+              {issueMap.get(activeSegment.index)?.join(" ") ??
+                `${wrapText(activeSegment.text).lines.length}/2 lines`}
+            </span>
+          </div>
+        )}
       </section>
+
     </main>
   );
 }

@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import { VideoInfo } from "./store";
+import { classifyVideoFormat } from "./video-format";
 import { TARGET_ASPECT } from "./safezone";
 
 function run(
@@ -46,7 +47,13 @@ export async function probeVideo(inputPath: string): Promise<VideoInfo> {
   const aspect = height > 0 ? width / height : 0;
   const isVertical916 = Math.abs(aspect - TARGET_ASPECT) < 0.02;
 
-  return { width, height, durationMs, isVertical916 };
+  return {
+    width,
+    height,
+    durationMs,
+    isVertical916,
+    format: classifyVideoFormat(width, height),
+  };
 }
 
 function sec(ms: number): string {

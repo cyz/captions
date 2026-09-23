@@ -1,5 +1,10 @@
 import { promises as fs } from "fs";
-import { downloadArtifact, getArtifactSize, uploadArtifactFromFile } from "./artifacts";
+import {
+  deleteArtifact,
+  downloadArtifact,
+  getArtifactSize,
+  uploadArtifactFromFile,
+} from "./artifacts";
 import { getQueueClient, isAzureStorageEnabled } from "./azure";
 import { renderOverlays } from "./overlay";
 import { burnCaptions, probeVideo } from "./ffmpeg";
@@ -73,6 +78,7 @@ export async function processJob(jobId: string): Promise<void> {
       paths.overlays,
       width,
       height,
+      meta.captionStyle,
     );
 
     await burnCaptions({
@@ -91,6 +97,10 @@ export async function processJob(jobId: string): Promise<void> {
 
     await progressUpdates;
     await uploadArtifactFromFile(jobId, "output", paths.output, "video/mp4");
+    await Promise.all([
+      deleteArtifact(jobId, "video"),
+      deleteArtifact(jobId, "srt"),
+    ]);
     await updateMeta(jobId, { status: "done", progress: 100 });
   } catch (err) {
     await progressUpdates.catch(() => undefined);

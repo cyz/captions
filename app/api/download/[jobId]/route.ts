@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createReadStream } from "fs";
-import { promises as fs } from "fs";
 import { Readable } from "stream";
-import { createArtifactReadUrl } from "@/lib/artifacts";
-import { isAzureStorageEnabled } from "@/lib/azure";
-import { jobPaths } from "@/lib/paths";
+import { deleteArtifact, openArtifactDownload } from "@/lib/artifacts";
 import { readMeta } from "@/lib/store";
 
 export const runtime = "nodejs";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ jobId: string }> },
 ) {
   const { jobId } = await params;
@@ -19,26 +15,32 @@ export async function GET(
     return NextResponse.json({ error: "Video is not ready yet." }, { status: 404 });
   }
 
-  if (isAzureStorageEnabled()) {
-    return NextResponse.redirect(await createArtifactReadUrl(jobId, "output"));
-  }
-
-  const outputPath = jobPaths(jobId).output;
-  let size: number;
+  let download: Awaited<ReturnType<typeof openArtifactDownload>>;
   try {
-    size = (await fs.stat(outputPath)).size;
-  } catch {
+    download = await openArtifactDownload(jobId, "output");
+  } catch (error) {
+    console.error(`Could not open output for job ${jobId}`, error);
     return NextResponse.json({ error: "File not found." }, { status: 404 });
   }
 
-  const nodeStream = createReadStream(outputPath);
-  const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream;
+  download.stream.once("end", () => {
+    void deleteArtifact(jobId, "output").catch((error) => {
+      console.error(`Could not delete downloaded output for job ${jobId}`, error);
+    });
+  });
+  req.signal.addEventListener("abort", () => download.stream.destroy(), {
+    once: true,
+  });
+  const webStream = Readable.toWeb(download.stream) as unknown as ReadableStream;
 
   return new NextResponse(webStream, {
     headers: {
       "Content-Type": "video/mp4",
-      "Content-Length": String(size),
+      ...(download.contentLength !== undefined
+        ? { "Content-Length": String(download.contentLength) }
+        : {}),
       "Content-Disposition": `attachment; filename="captioned-${jobId}.mp4"`,
+      "Cache-Control": "no-store",
     },
   });
 }

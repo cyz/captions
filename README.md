@@ -18,9 +18,11 @@ A focused web app for editing SRT subtitles and burning them directly into verti
 - **Smart Line Breaks** - Balance caption text across two lines at the nearest word boundary
 - **Time Splitting** - Divide long captions into two consecutive timed segments
 - **Safe-Zone Validation** - Detect empty text, overlapping timestamps, invalid durations, and overflow
-- **Short-Form Layout** - Keep text clear of platform controls on vertical 9:16 videos
+- **Adaptive Layout** - Detect social and long-form videos and adjust the editing workspace
+- **Caption Styling** - Customize system font, size, alignment, text, and background colors
 - **Burned-In Captions** - Render styled subtitles into an H.264 MP4 with FFmpeg
 - **Render Progress** - Follow processing status and download the completed video
+- **Automatic Cleanup** - Delete source files after rendering and output files after download
 
 ## Usage
 
@@ -141,7 +143,10 @@ Browser -> scale-to-zero Container App -> Table Storage
 - The web app uses `0.25` vCPU and `0.5 GiB`, with zero minimum replicas.
 - The render job uses `1` vCPU and `2 GiB` only while processing.
 - Managed identities grant the web app and worker access to Storage.
-- Input blobs expire after one day and rendered outputs after seven days.
+- The app deletes input blobs after a successful render and deletes the output
+  after its first completed download.
+- Lifecycle policies remain as a fallback, deleting orphaned inputs after one
+  day and outputs after seven days.
 
 ### API Routes
 
