@@ -122,6 +122,89 @@ export interface SegmentValidation {
   errors: string[];
 }
 
+function flattenText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function reindex(segments: Segment[]): Segment[] {
+  return segments.map((segment, i) => ({ ...segment, index: i + 1 }));
+}
+
+// Join a segment with the one that follows it into a single timed caption.
+export function mergeWithNext(segments: Segment[], index: number): Segment[] {
+  const position = segments.findIndex((segment) => segment.index === index);
+  const current = segments[position];
+  const next = segments[position + 1];
+  if (!current || !next) return segments;
+  const merged: Segment = {
+    index: current.index,
+    start: Math.min(current.start, next.start),
+    end: Math.max(current.end, next.end),
+    text: `${flattenText(current.text)} ${flattenText(next.text)}`.trim(),
+  };
+  return reindex([
+    ...segments.slice(0, position),
+    merged,
+    ...segments.slice(position + 2),
+  ]);
+}
+
+export interface GroupOptions {
+  maxChars?: number;
+  maxGapMs?: number;
+  maxDurationMs?: number;
+}
+
+// Combine consecutive short captions (e.g. word-by-word SRT exports) into
+// readable phrases. A phrase ends at sentence punctuation, a pause longer than
+// maxGapMs, or when adding the next caption would exceed maxChars/maxDurationMs.
+export function groupShortSegments(
+  segments: Segment[],
+  {
+    maxChars = MAX_CHARS_PER_LINE,
+    maxGapMs = 700,
+    maxDurationMs = 5000,
+  }: GroupOptions = {},
+): Segment[] {
+  const grouped: Segment[] = [];
+  let current: Segment | null = null;
+
+  for (const segment of segments) {
+    if (!current) {
+      current = { ...segment };
+      continue;
+    }
+    const currentText = flattenText(current.text);
+    const nextText = flattenText(segment.text);
+    const combined = `${currentText} ${nextText}`;
+    const fits =
+      nextText !== "" &&
+      currentText !== "" &&
+      !/[.!?…]["')\]]?$/.test(currentText) &&
+      segment.start - current.end <= maxGapMs &&
+      combined.length <= maxChars &&
+      segment.end - current.start <= maxDurationMs;
+    if (fits) {
+      current = { ...current, end: Math.max(current.end, segment.end), text: combined };
+    } else {
+      grouped.push(current);
+      current = { ...segment };
+    }
+  }
+  if (current) grouped.push(current);
+
+  return reindex(grouped);
+}
+
+// True when most captions are a single word, i.e. a word-by-word transcript.
+export function looksWordByWord(segments: Segment[]): boolean {
+  if (segments.length < 4) return false;
+  const single = segments.filter(
+    (segment) => !/\s/.test(flattenText(segment.text)),
+  ).length;
+  return single / segments.length >= 0.6;
+}
+
 // Validate ordering, timing and the two-line rule across all segments.
 export function validateSegments(segments: Segment[]): SegmentValidation[] {
   const results: SegmentValidation[] = [];

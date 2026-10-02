@@ -38,22 +38,51 @@ const SYSTEM_FONT_PATHS: Record<CaptionStyle["fontFamily"], string[]> = {
   ],
 };
 
-const registeredFonts = new Set<string>();
+// Used when none of the preferred files for a family exist (e.g. Arial in a
+// Linux container without Liberation fonts), so export never hard-fails.
+const FALLBACK_FONT_PATHS = [
+  "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+  "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+  "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+  "/System/Library/Fonts/Helvetica.ttc",
+  "C:\\Windows\\Fonts\\arialbd.ttf",
+];
+
+const registeredFonts = new Map<string, string>();
 
 async function ensureFont(fontFamily: CaptionStyle["fontFamily"]): Promise<string> {
+  const cached = registeredFonts.get(fontFamily);
+  if (cached) return cached;
+
   const alias = `Caption${fontFamily.replace(/\s+/g, "")}`;
-  if (registeredFonts.has(alias)) return alias;
-  for (const candidate of SYSTEM_FONT_PATHS[fontFamily]) {
+  const candidates = [
+    ...new Set([...SYSTEM_FONT_PATHS[fontFamily], ...FALLBACK_FONT_PATHS]),
+  ];
+  for (const candidate of candidates) {
     try {
       await fs.access(candidate);
-      GlobalFonts.registerFromPath(candidate, alias);
-      registeredFonts.add(alias);
-      return alias;
     } catch {
-      // try next
+      continue;
+    }
+    // registerFromPath returns null (instead of throwing) on failure.
+    if (GlobalFonts.registerFromPath(candidate, alias)) {
+      registeredFonts.set(fontFamily, alias);
+      return alias;
     }
   }
-  throw new Error("No font available to render the captions.");
+
+  // Last resort: any font the canvas runtime discovered on the system.
+  const systemFamily = GlobalFonts.families[0]?.family;
+  if (systemFamily) {
+    const quoted = `"${systemFamily.replace(/"/g, "")}"`;
+    registeredFonts.set(fontFamily, quoted);
+    return quoted;
+  }
+
+  throw new Error(
+    "No font available to render the captions. Install a TrueType font such as fonts-dejavu-core or fonts-liberation on the render host.",
+  );
 }
 
 export interface Overlay {

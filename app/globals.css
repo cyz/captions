@@ -1979,6 +1979,41 @@ a {
   color: var(--cp-text);
 }
 
+.segment-editor-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.side-grouping {
+  margin-bottom: 10px;
+}
+
+.side-grouping p {
+  color: var(--cp-text-muted);
+  font-size: 9px;
+  line-height: 1.4;
+  margin: 0 0 6px;
+}
+
+.side-grouping div {
+  display: flex;
+  gap: 4px;
+}
+
+.side-grouping button {
+  background: var(--cp-bg-elevated);
+  border: 1px solid var(--cp-border);
+  border-radius: 5px;
+  color: var(--cp-text);
+  cursor: pointer;
+  font-size: 9px;
+  padding: 6px 8px;
+}
+
+.side-grouping button:hover {
+  background: var(--cp-surface-soft);
+}
+
 .segment-editor-toolbar button {
   background: transparent;
   border: 0;

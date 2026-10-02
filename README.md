@@ -17,6 +17,7 @@ A focused web app for editing SRT subtitles and burning them directly into verti
 - **Segment Editor** - Update subtitle text, start time, and end time independently
 - **Smart Line Breaks** - Balance caption text across two lines at the nearest word boundary
 - **Time Splitting** - Divide long captions into two consecutive timed segments
+- **Merge and Group** - Join a caption with the next one, or group word-by-word captions into readable phrases
 - **Safe-Zone Validation** - Detect empty text, overlapping timestamps, invalid durations, and overflow
 - **Adaptive Layout** - Detect social and long-form videos and adjust the editing workspace
 - **Caption Styling** - Customize system font, size, alignment, text, and background colors

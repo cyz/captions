@@ -10,7 +10,14 @@ import {
   normalizeCaptionStyle,
   type CaptionStyle,
 } from "@/lib/caption-style";
-import { Segment, validateSegments, wrapText } from "@/lib/srt";
+import {
+  Segment,
+  groupShortSegments,
+  looksWordByWord,
+  mergeWithNext,
+  validateSegments,
+  wrapText,
+} from "@/lib/srt";
 import type { VideoInfo } from "@/lib/store";
 import {
   classifyVideoFormat,
@@ -66,6 +73,7 @@ export default function EditorPage({
   const [status, setStatus] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [beforeGrouping, setBeforeGrouping] = useState<Segment[] | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -116,6 +124,7 @@ export default function EditorPage({
 
   const updateSegment = useCallback(
     (index: number, patch: Partial<Segment>) => {
+      setBeforeGrouping(null);
       setSegments((current) =>
         current.map((segment) =>
           segment.index === index ? { ...segment, ...patch } : segment,
@@ -195,6 +204,7 @@ export default function EditorPage({
     }
 
     if (!firstText || !secondText) return;
+    setBeforeGrouping(null);
 
     const duration = segment.end - segment.start;
     const ratio = firstText.length / (firstText.length + secondText.length);
@@ -230,6 +240,35 @@ export default function EditorPage({
     setSelectedIndex(segment.index);
     seek(segment.start);
   }, [seek]);
+
+  const mergeSegmentWithNext = useCallback(
+    (segment: Segment) => {
+      setBeforeGrouping(null);
+      setSegments((current) => mergeWithNext(current, segment.index));
+      setSelectedIndex(segment.index);
+    },
+    [],
+  );
+
+  const groupWords = useCallback(() => {
+    const grouped = groupShortSegments(segments);
+    if (grouped.length === segments.length) return;
+    setBeforeGrouping(segments);
+    setSegments(grouped);
+    const containing =
+      grouped.find((s) => currentMs >= s.start && currentMs <= s.end) ??
+      grouped[0];
+    setSelectedIndex(containing?.index ?? null);
+  }, [currentMs, segments]);
+
+  const undoGrouping = useCallback(() => {
+    if (!beforeGrouping) return;
+    setSegments(beforeGrouping);
+    setBeforeGrouping(null);
+    setSelectedIndex(beforeGrouping[0]?.index ?? null);
+  }, [beforeGrouping]);
+
+  const wordByWord = useMemo(() => looksWordByWord(segments), [segments]);
 
   async function save(): Promise<boolean> {
     setSaving(true);
@@ -432,6 +471,24 @@ export default function EditorPage({
               >
                 {issues.length ? `${issues.length} to review` : "✓ All clear"}
               </div>
+              <div className="side-grouping">
+                {wordByWord && (
+                  <p>
+                    Captions show one word at a time. Group them into short
+                    phrases?
+                  </p>
+                )}
+                <div>
+                  <button type="button" onClick={groupWords}>
+                    ⧉ Group words into phrases
+                  </button>
+                  {beforeGrouping && (
+                    <button type="button" onClick={undoGrouping}>
+                      ↺ Undo
+                    </button>
+                  )}
+                </div>
+              </div>
               <div className="side-segment-list">
                 {segments.map((segment) => {
                   const segmentIssues = issueMap.get(segment.index) ?? [];
@@ -575,6 +632,16 @@ export default function EditorPage({
                 onClick={() => splitInTime(activeSegment)}
               >
                 ✂ Split timing
+              </button>
+              <button
+                type="button"
+                onClick={() => mergeSegmentWithNext(activeSegment)}
+                disabled={
+                  segments[segments.length - 1]?.index === activeSegment.index
+                }
+                title="Join this caption with the next one"
+              >
+                ⊕ Merge with next
               </button>
             </div>
           )}
