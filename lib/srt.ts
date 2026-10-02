@@ -7,6 +7,14 @@ export interface Segment {
   end: number;
   // Raw text, may contain a single "\n" separating up to two lines.
   text: string;
+  // Start (ms) of each word, kept when it comes from a word-by-word source.
+  wordStarts?: number[];
+}
+
+export interface WordTiming {
+  text: string;
+  start: number;
+  end: number;
 }
 
 const TIME_RE =
@@ -130,18 +138,74 @@ function reindex(segments: Segment[]): Segment[] {
   return segments.map((segment, i) => ({ ...segment, index: i + 1 }));
 }
 
+export function segmentWords(text: string): string[] {
+  const flat = flattenText(text);
+  return flat ? flat.split(" ") : [];
+}
+
+// Per-word timing: real when known, otherwise split by word length.
+export function wordTimings(segment: Segment): WordTiming[] {
+  const words = segmentWords(segment.text);
+  if (words.length === 0) return [];
+  const { start, end } = segment;
+  let starts: number[];
+  if (segment.wordStarts?.length === words.length) {
+    starts = segment.wordStarts.map((value) =>
+      Math.min(end, Math.max(start, value)),
+    );
+    starts[0] = start;
+    for (let i = 1; i < starts.length; i++) {
+      starts[i] = Math.max(starts[i], starts[i - 1]);
+    }
+  } else {
+    const weights = words.map((word) => Math.max(2, word.length));
+    const total = weights.reduce((sum, weight) => sum + weight, 0);
+    let accumulated = 0;
+    starts = weights.map((weight) => {
+      const value = start + Math.round(((end - start) * accumulated) / total);
+      accumulated += weight;
+      return value;
+    });
+  }
+  return words.map((text, i) => ({
+    text,
+    start: starts[i],
+    end: i + 1 < words.length ? starts[i + 1] : end,
+  }));
+}
+
+// Known word starts of a segment, or null when they would have to be guessed.
+function knownWordStarts(segment: Segment): number[] | null {
+  const words = segmentWords(segment.text);
+  if (words.length === 0) return null;
+  if (segment.wordStarts?.length === words.length) return segment.wordStarts;
+  return words.length === 1 ? [segment.start] : null;
+}
+
+function withWordStarts(segment: Segment, starts: number[] | null): Segment {
+  const { wordStarts: _discarded, ...rest } = segment;
+  return starts ? { ...rest, wordStarts: starts } : rest;
+}
+
 // Join a segment with the one that follows it into a single timed caption.
 export function mergeWithNext(segments: Segment[], index: number): Segment[] {
   const position = segments.findIndex((segment) => segment.index === index);
   const current = segments[position];
   const next = segments[position + 1];
   if (!current || !next) return segments;
-  const merged: Segment = {
-    index: current.index,
-    start: Math.min(current.start, next.start),
-    end: Math.max(current.end, next.end),
-    text: `${flattenText(current.text)} ${flattenText(next.text)}`.trim(),
-  };
+  const merged: Segment = withWordStarts(
+    {
+      index: current.index,
+      start: Math.min(current.start, next.start),
+      end: Math.max(current.end, next.end),
+      text: `${flattenText(current.text)} ${flattenText(next.text)}`.trim(),
+    },
+    (() => {
+      const first = knownWordStarts(current);
+      const second = knownWordStarts(next);
+      return first && second ? [...first, ...second] : null;
+    })(),
+  );
   return reindex([
     ...segments.slice(0, position),
     merged,
@@ -168,10 +232,12 @@ export function groupShortSegments(
 ): Segment[] {
   const grouped: Segment[] = [];
   let current: Segment | null = null;
+  let currentStarts: number[] | null = null;
 
   for (const segment of segments) {
     if (!current) {
       current = { ...segment };
+      currentStarts = knownWordStarts(segment);
       continue;
     }
     const currentText = flattenText(current.text);
@@ -185,13 +251,17 @@ export function groupShortSegments(
       combined.length <= maxChars &&
       segment.end - current.start <= maxDurationMs;
     if (fits) {
+      const nextStarts = knownWordStarts(segment);
       current = { ...current, end: Math.max(current.end, segment.end), text: combined };
+      currentStarts =
+        currentStarts && nextStarts ? [...currentStarts, ...nextStarts] : null;
     } else {
-      grouped.push(current);
+      grouped.push(withWordStarts(current, currentStarts));
       current = { ...segment };
+      currentStarts = knownWordStarts(segment);
     }
   }
-  if (current) grouped.push(current);
+  if (current) grouped.push(withWordStarts(current, currentStarts));
 
   return reindex(grouped);
 }

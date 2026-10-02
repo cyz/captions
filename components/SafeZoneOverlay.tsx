@@ -1,11 +1,13 @@
 "use client";
 
+import { Fragment } from "react";
 import {
   getSafeZoneProfile,
   type SafeZoneFormat,
 } from "@/lib/safezone";
 import {
   DEFAULT_CAPTION_STYLE,
+  readableTextOn,
   type CaptionStyle,
 } from "@/lib/caption-style";
 
@@ -15,16 +17,20 @@ export default function SafeZoneOverlay({
   format = "social",
   showGuides = true,
   captionStyle = DEFAULT_CAPTION_STYLE,
+  activeWord = null,
 }: {
   caption?: string;
   format?: SafeZoneFormat;
   showGuides?: boolean;
   captionStyle?: CaptionStyle;
+  activeWord?: number | null;
 }) {
   const safeZone = getSafeZoneProfile(format);
   const top = safeZone.topMargin * 100;
   const left = safeZone.leftMargin * 100;
   const right = safeZone.rightMargin * 100;
+  const highlighting = captionStyle.wordHighlight && activeWord !== null;
+  let wordCounter = 0;
 
   return (
     <div className="pointer-events-none absolute inset-0">
@@ -55,9 +61,7 @@ export default function SafeZoneOverlay({
             style={{
               color: captionStyle.textColor,
               background: captionStyle.backgroundEnabled
-                ? `color-mix(in srgb, ${captionStyle.backgroundColor} ${
-                    captionStyle.backgroundOpacity * 100
-                  }%, transparent)`
+                ? captionStyle.backgroundColor
                 : "transparent",
               fontFamily: captionStyle.fontFamily,
               fontWeight: captionStyle.fontWeight,
@@ -79,7 +83,39 @@ export default function SafeZoneOverlay({
                 key={i}
                 className="caption-preview-line"
               >
-                {line}
+                {highlighting
+                  ? line
+                      .split(" ")
+                      .filter(Boolean)
+                      .map((word, position) => {
+                        const active = wordCounter++ === activeWord;
+                        const pill = captionStyle.highlightMode === "pill";
+                        return (
+                          <Fragment key={position}>
+                            {position > 0 && " "}
+                            <span
+                              style={
+                                active
+                                  ? pill
+                                    ? {
+                                        background: captionStyle.highlightColor,
+                                        color: readableTextOn(
+                                          captionStyle.highlightColor,
+                                        ),
+                                        borderRadius: "0.2em",
+                                        margin: "0 -0.1em",
+                                        padding: "0 0.1em",
+                                      }
+                                    : { color: captionStyle.highlightColor }
+                                  : undefined
+                              }
+                            >
+                              {word}
+                            </span>
+                          </Fragment>
+                        );
+                      })
+                  : line}
               </div>
             ))}
           </div>

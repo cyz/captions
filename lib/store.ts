@@ -15,6 +15,7 @@ export type JobStatus =
   | "queued"
   | "processing"
   | "done"
+  | "cancelled"
   | "error";
 
 export interface VideoInfo {

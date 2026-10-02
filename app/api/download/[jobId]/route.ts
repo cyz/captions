@@ -23,10 +23,14 @@ export async function GET(
     return NextResponse.json({ error: "File not found." }, { status: 404 });
   }
 
+  // "end" only means the server finished reading; wait and skip if the client aborted.
   download.stream.once("end", () => {
-    void deleteArtifact(jobId, "output").catch((error) => {
-      console.error(`Could not delete downloaded output for job ${jobId}`, error);
-    });
+    setTimeout(() => {
+      if (req.signal.aborted) return;
+      void deleteArtifact(jobId, "output").catch((error) => {
+        console.error(`Could not delete downloaded output for job ${jobId}`, error);
+      });
+    }, 5000);
   });
   req.signal.addEventListener("abort", () => download.stream.destroy(), {
     once: true,

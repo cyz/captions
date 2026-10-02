@@ -3,6 +3,7 @@
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CaptionStylePanel from "@/components/editor/CaptionStylePanel";
 import CaptionTimeline from "@/components/editor/CaptionTimeline";
+import TimeField from "@/components/editor/TimeField";
 import SafeZoneOverlay from "@/components/SafeZoneOverlay";
 import { readJsonResponse } from "@/lib/api-response";
 import {
@@ -10,14 +11,18 @@ import {
   normalizeCaptionStyle,
   type CaptionStyle,
 } from "@/lib/caption-style";
+import { MAX_CHARS_PER_LINE, MAX_LINES } from "@/lib/safezone";
 import {
   Segment,
   groupShortSegments,
   looksWordByWord,
   mergeWithNext,
+  serializeSrt,
   validateSegments,
+  wordTimings,
   wrapText,
 } from "@/lib/srt";
+import { renderStageLabel, RENDER_PHASES } from "@/lib/render-progress";
 import type { VideoInfo } from "@/lib/store";
 import {
   classifyVideoFormat,
@@ -26,13 +31,24 @@ import {
 
 type EditorTool = "style" | "captions";
 
-function msToInput(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const minutes = String(Math.floor(seconds / 60)).padStart(2, "0");
-  const remainder = String(seconds % 60).padStart(2, "0");
-  const millis = String(ms % 1000).padStart(3, "0");
-  return `${minutes}:${remainder}.${millis}`;
+interface Snapshot {
+  segments: Segment[];
+  captionStyle: CaptionStyle;
 }
+
+const HISTORY_LIMIT = 100;
+const COALESCE_MS = 1000;
+const MAX_POLL_FAILURES = 10;
+
+const SHORTCUTS: Array<[string, string]> = [
+  ["Space / K", "Play or pause"],
+  ["J / L", "Back / forward 5 seconds"],
+  ["↑ / ↓", "Previous / next caption"],
+  ["I / O", "Set caption start / end at the playhead"],
+  ["⌘Z / ⇧⌘Z", "Undo / redo"],
+  ["⌘↵", "Export video"],
+  ["?", "Show or hide this list"],
+];
 
 function compactTime(ms: number): string {
   const seconds = Math.floor(ms / 1000);
@@ -41,13 +57,13 @@ function compactTime(ms: number): string {
   ).padStart(2, "0")}`;
 }
 
-function inputToMs(value: string): number {
-  const match = /^(\d+):(\d{1,2})(?:\.(\d{1,3}))?$/.exec(value.trim());
-  if (!match) return Number.NaN;
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
   return (
-    Number.parseInt(match[1], 10) * 60000 +
-    Number.parseInt(match[2], 10) * 1000 +
-    (match[3] ? Number.parseInt(match[3].padEnd(3, "0"), 10) : 0)
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
   );
 }
 
@@ -72,8 +88,87 @@ export default function EditorPage({
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
+  const [outputReady, setOutputReady] = useState(false);
+  const [downloaded, setDownloaded] = useState(false);
+  const [etaMs, setEtaMs] = useState<number | null>(null);
+  const encodeStartRef = useRef<{ at: number; progress: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [beforeGrouping, setBeforeGrouping] = useState<Segment[] | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
+  const [followPlayback, setFollowPlayback] = useState(true);
+  const [connectionLost, setConnectionLost] = useState(false);
+  const [ahead, setAhead] = useState<number | null>(null);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const latestRef = useRef<Snapshot>({
+    segments: [],
+    captionStyle: { ...DEFAULT_CAPTION_STYLE },
+  });
+  const historyRef = useRef<{
+    past: Snapshot[];
+    future: Snapshot[];
+    key: string | null;
+    at: number;
+  }>({ past: [], future: [], key: null, at: 0 });
+
+  useEffect(() => {
+    latestRef.current = { segments, captionStyle };
+  }, [segments, captionStyle]);
+
+  // Edits made in quick succession with the same key share one undo step.
+  const pushHistory = useCallback((key?: string) => {
+    const history = historyRef.current;
+    const now = Date.now();
+    const coalesce =
+      key !== undefined && key === history.key && now - history.at < COALESCE_MS;
+    history.key = key ?? null;
+    history.at = now;
+    setDirty(true);
+    if (coalesce) return;
+    history.past.push(latestRef.current);
+    if (history.past.length > HISTORY_LIMIT) history.past.shift();
+    history.future = [];
+    setHistoryCounts({ undo: history.past.length, redo: 0 });
+  }, []);
+
+  const restoreSnapshot = useCallback((snapshot: Snapshot) => {
+    latestRef.current = snapshot;
+    setSegments(snapshot.segments);
+    setCaptionStyle(snapshot.captionStyle);
+    setSelectedIndex((current) =>
+      snapshot.segments.some((segment) => segment.index === current)
+        ? current
+        : (snapshot.segments[0]?.index ?? null),
+    );
+    setDirty(true);
+  }, []);
+
+  const undo = useCallback(() => {
+    const history = historyRef.current;
+    const previous = history.past.pop();
+    if (!previous) return;
+    history.future.push(latestRef.current);
+    history.key = null;
+    setHistoryCounts({ undo: history.past.length, redo: history.future.length });
+    restoreSnapshot(previous);
+  }, [restoreSnapshot]);
+
+  const redo = useCallback(() => {
+    const history = historyRef.current;
+    const next = history.future.pop();
+    if (!next) return;
+    history.past.push(latestRef.current);
+    history.key = null;
+    setHistoryCounts({ undo: history.past.length, redo: history.future.length });
+    restoreSnapshot(next);
+  }, [restoreSnapshot]);
+
+  const changeStyle = useCallback(
+    (next: CaptionStyle) => {
+      pushHistory("style");
+      setCaptionStyle(next);
+    },
+    [pushHistory],
+  );
 
   useEffect(() => {
     void (async () => {
@@ -83,11 +178,21 @@ export default function EditorPage({
           segments: Segment[];
           video?: VideoInfo;
           captionStyle?: CaptionStyle;
+          render?: { status: string; progress?: number; outputReady?: boolean };
         }>(response);
         setSegments(data.segments);
         setVideo(data.video ?? null);
         setCaptionStyle(normalizeCaptionStyle(data.captionStyle));
         setSelectedIndex(data.segments[0]?.index ?? null);
+        const render = data.render;
+        if (render?.status === "queued" || render?.status === "processing") {
+          setStatus(render.status);
+          setProgress(render.progress ?? 0);
+        } else if (render?.status === "done" && render.outputReady) {
+          setStatus("done");
+          setProgress(100);
+          setOutputReady(true);
+        }
       } catch (loadError) {
         setError(
           loadError instanceof Error
@@ -109,29 +214,43 @@ export default function EditorPage({
   const format: VideoFormat =
     video?.format ??
     (video ? classifyVideoFormat(video.width, video.height) : "social");
-  const activeSegment = useMemo(() => {
-    const timed = segments.find(
-      (segment) => currentMs >= segment.start && currentMs <= segment.end,
-    );
-    const selected = segments.find(
-      (segment) => segment.index === selectedIndex,
-    );
-    return isPlaying ? timed : selected ?? timed;
-  }, [currentMs, isPlaying, segments, selectedIndex]);
-  const activeCaption = activeSegment
-    ? wrapText(activeSegment.text).lines.join("\n")
+  const timedSegment = useMemo(
+    () =>
+      segments.find(
+        (segment) => currentMs >= segment.start && currentMs <= segment.end,
+      ),
+    [currentMs, segments],
+  );
+  const selectedSegment = useMemo(
+    () => segments.find((segment) => segment.index === selectedIndex),
+    [segments, selectedIndex],
+  );
+  const activeSegment = selectedSegment ?? timedSegment;
+  const previewSegment = isPlaying ? timedSegment : activeSegment;
+  const activeCaption = previewSegment
+    ? wrapText(previewSegment.text).lines.join("\n")
     : "";
+  const activeWord = useMemo(() => {
+    if (!captionStyle.wordHighlight || !previewSegment) return null;
+    const timings = wordTimings(previewSegment);
+    if (timings.length === 0) return null;
+    let spoken = 0;
+    timings.forEach((word, position) => {
+      if (currentMs >= word.start) spoken = position;
+    });
+    return spoken;
+  }, [captionStyle.wordHighlight, currentMs, previewSegment]);
 
   const updateSegment = useCallback(
     (index: number, patch: Partial<Segment>) => {
-      setBeforeGrouping(null);
+      pushHistory(`${index}:${Object.keys(patch).join(",")}`);
       setSegments((current) =>
         current.map((segment) =>
           segment.index === index ? { ...segment, ...patch } : segment,
         ),
       );
     },
-    [],
+    [pushHistory],
   );
 
   const seek = useCallback((milliseconds: number) => {
@@ -204,7 +323,7 @@ export default function EditorPage({
     }
 
     if (!firstText || !secondText) return;
-    setBeforeGrouping(null);
+    pushHistory();
 
     const duration = segment.end - segment.start;
     const ratio = firstText.length / (firstText.length + secondText.length);
@@ -239,34 +358,27 @@ export default function EditorPage({
     });
     setSelectedIndex(segment.index);
     seek(segment.start);
-  }, [seek]);
+  }, [pushHistory, seek]);
 
   const mergeSegmentWithNext = useCallback(
     (segment: Segment) => {
-      setBeforeGrouping(null);
+      pushHistory();
       setSegments((current) => mergeWithNext(current, segment.index));
       setSelectedIndex(segment.index);
     },
-    [],
+    [pushHistory],
   );
 
   const groupWords = useCallback(() => {
     const grouped = groupShortSegments(segments);
     if (grouped.length === segments.length) return;
-    setBeforeGrouping(segments);
+    pushHistory();
     setSegments(grouped);
     const containing =
       grouped.find((s) => currentMs >= s.start && currentMs <= s.end) ??
       grouped[0];
     setSelectedIndex(containing?.index ?? null);
-  }, [currentMs, segments]);
-
-  const undoGrouping = useCallback(() => {
-    if (!beforeGrouping) return;
-    setSegments(beforeGrouping);
-    setBeforeGrouping(null);
-    setSelectedIndex(beforeGrouping[0]?.index ?? null);
-  }, [beforeGrouping]);
+  }, [currentMs, pushHistory, segments]);
 
   const wordByWord = useMemo(() => looksWordByWord(segments), [segments]);
 
@@ -280,6 +392,7 @@ export default function EditorPage({
         body: JSON.stringify({ segments, captionStyle }),
       });
       await readJsonResponse(response);
+      setDirty(false);
       return true;
     } catch (saveError) {
       setError(
@@ -304,8 +417,12 @@ export default function EditorPage({
     try {
       const response = await fetch(`/api/render/${jobId}`, { method: "POST" });
       await readJsonResponse(response);
+      encodeStartRef.current = null;
+      setEtaMs(null);
+      setProgress(0);
+      setOutputReady(false);
+      setDownloaded(false);
       setStatus("queued");
-      pollRender();
     } catch (renderError) {
       setError(
         renderError instanceof Error
@@ -315,33 +432,237 @@ export default function EditorPage({
     }
   }
 
-  function pollRender() {
-    const timer = window.setInterval(async () => {
+  const rendering = status === "queued" || status === "processing";
+  const downloadable = status === "done" && outputReady && !downloaded;
+
+  useEffect(() => {
+    if (!rendering) return;
+    let cancelled = false;
+    let failures = 0;
+    let timer = 0;
+
+    const tick = async () => {
       try {
-        const response = await fetch(`/api/status/${jobId}`);
+        const response = await fetch(`/api/status/${jobId}`, { cache: "no-store" });
         const data = await readJsonResponse<{
           status: string;
           progress?: number;
           error?: string | null;
+          ahead?: number | null;
         }>(response);
+        if (cancelled) return;
+        failures = 0;
+        setConnectionLost(false);
+        const nextProgress = data.progress ?? 0;
         setStatus(data.status);
-        setProgress(data.progress ?? 0);
-        if (data.status === "done" || data.status === "error") {
-          window.clearInterval(timer);
-          if (data.status === "error") {
-            setError(data.error || "An error occurred during export.");
-          }
+        setProgress(nextProgress);
+        setAhead(data.ahead ?? null);
+
+        // Estimate remaining time from the encoding rate (the longest phase).
+        const encodeFrom = RENDER_PHASES.encode[0];
+        if (data.status === "processing" && nextProgress >= encodeFrom) {
+          const now = Date.now();
+          encodeStartRef.current ??= { at: now, progress: nextProgress };
+          const done = nextProgress - encodeStartRef.current.progress;
+          const elapsed = now - encodeStartRef.current.at;
+          setEtaMs(
+            done >= 3 && elapsed > 2000
+              ? (elapsed / done) * (100 - nextProgress)
+              : null,
+          );
+        }
+
+        if (data.status === "done") {
+          setOutputReady(true);
+          setEtaMs(null);
+        } else if (data.status === "error") {
+          setEtaMs(null);
+          setError(data.error || "An error occurred during export.");
         }
       } catch (pollError) {
-        window.clearInterval(timer);
-        setError(
-          pollError instanceof Error
-            ? pollError.message
-            : "Could not read the export status.",
-        );
+        if (cancelled) return;
+        // The export keeps running on the server, so a network blip is not fatal.
+        failures += 1;
+        if (failures >= 3) setConnectionLost(true);
+        if (failures >= MAX_POLL_FAILURES) {
+          setStatus("error");
+          setError(
+            pollError instanceof Error
+              ? pollError.message
+              : "Could not read the export status.",
+          );
+          return;
+        }
       }
-    }, 1000);
+      const delay =
+        failures > 0
+          ? Math.min(10000, 1000 * 2 ** failures)
+          : document.hidden
+            ? 5000
+            : 1000;
+      timer = window.setTimeout(() => void tick(), delay);
+    };
+
+    timer = window.setTimeout(() => void tick(), 1000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [jobId, rendering]);
+
+  useEffect(() => {
+    const base = "Caption Studio";
+    document.title = rendering
+      ? `${progress}% · Exporting — ${base}`
+      : downloadable
+        ? `✓ Video ready — ${base}`
+        : base;
+    return () => {
+      document.title = base;
+    };
+  }, [downloadable, progress, rendering]);
+
+  const cancelRender = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/render/${jobId}`, { method: "DELETE" });
+      await readJsonResponse(response);
+      setStatus("cancelled");
+      setProgress(0);
+      setEtaMs(null);
+      setAhead(null);
+      setConnectionLost(false);
+    } catch (cancelError) {
+      setError(
+        cancelError instanceof Error
+          ? cancelError.message
+          : "Could not cancel the export.",
+      );
+    }
+  }, [jobId]);
+
+  function downloadSrt() {
+    const blob = new Blob([serializeSrt(segments)], {
+      type: "application/x-subrip",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `captions-${jobId.slice(0, 6)}.srt`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
+
+  const markAtPlayhead = useCallback(
+    (field: "start" | "end") => {
+      if (!activeSegment) return;
+      const time = Math.round((videoRef.current?.currentTime ?? currentMs / 1000) * 1000);
+      updateSegment(activeSegment.index, { [field]: time });
+    },
+    [activeSegment, currentMs, updateSegment],
+  );
+
+  const goToSegment = useCallback(
+    (offset: number) => {
+      if (segments.length === 0) return;
+      const position = segments.findIndex(
+        (segment) => segment.index === activeSegment?.index,
+      );
+      const next =
+        position === -1
+          ? offset > 0
+            ? 0
+            : segments.length - 1
+          : Math.min(segments.length - 1, Math.max(0, position + offset));
+      selectSegment(segments[next]);
+    },
+    [activeSegment, segments, selectSegment],
+  );
+
+  // Warn before closing the tab while work (or a not yet downloaded video) would be lost.
+  useEffect(() => {
+    if (!dirty && !rendering && !downloadable) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty, downloadable, rendering]);
+
+  useEffect(() => {
+    if (!isPlaying || !followPlayback || !timedSegment) return;
+    setSelectedIndex(timedSegment.index);
+  }, [followPlayback, isPlaying, timedSegment]);
+
+  const keyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => undefined);
+  useEffect(() => {
+    keyHandlerRef.current = (event) => {
+      const target = event.target;
+      const key = event.key.toLowerCase();
+      const modifier = event.metaKey || event.ctrlKey;
+      const exportable = !rendering && !saving && status !== "done";
+
+      if (modifier && key === "enter") {
+        event.preventDefault();
+        if (exportable) void startRender();
+        return;
+      }
+      if (modifier && (key === "z" || key === "y")) {
+        // Single-line inputs keep their native undo.
+        if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement) {
+          return;
+        }
+        event.preventDefault();
+        if (key === "y" || event.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if (event.altKey && (key === "arrowup" || key === "arrowdown")) {
+        event.preventDefault();
+        goToSegment(key === "arrowdown" ? 1 : -1);
+        return;
+      }
+      if (key === "escape") {
+        setShowShortcuts(false);
+        return;
+      }
+      if (modifier || event.altKey || isEditableTarget(target)) return;
+
+      const onControl =
+        target instanceof HTMLButtonElement || target instanceof HTMLAnchorElement;
+      if ((key === " " && !onControl) || key === "k") {
+        event.preventDefault();
+        togglePlayback();
+      } else if (key === "j" || key === "l") {
+        seek(currentMs + (key === "l" ? 5000 : -5000));
+      } else if (key === "arrowup" || key === "arrowdown") {
+        event.preventDefault();
+        goToSegment(key === "arrowdown" ? 1 : -1);
+      } else if (key === "i") {
+        markAtPlayhead("start");
+      } else if (key === "o") {
+        markAtPlayhead("end");
+      } else if (event.key === "?") {
+        setShowShortcuts((current) => !current);
+      }
+    };
+  });
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => keyHandlerRef.current(event);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
+
+  const stageLabel =
+    status === "queued" && ahead
+      ? `Waiting in queue · ${ahead} ahead`
+      : renderStageLabel(status, progress);
+  const etaLabel =
+    etaMs === null
+      ? null
+      : etaMs < 60000
+        ? `~${Math.max(5, Math.round(etaMs / 5000) * 5)} s left`
+        : `~${Math.round(etaMs / 60000)} min left`;
 
   if (loading) {
     return (
@@ -361,34 +682,137 @@ export default function EditorPage({
           <span>project-{jobId.slice(0, 6)}.mp4</span>
         </div>
         <div className="studio-top-actions">
-          <span className={`save-indicator ${saving ? "busy" : ""}`}>
-            {saving ? "Saving…" : "Local changes"}
-          </span>
-          <button type="button" onClick={() => void save()} className="studio-save">
-            Save
-          </button>
+          <div className="studio-history" role="group" aria-label="History">
+            <button
+              type="button"
+              onClick={undo}
+              disabled={historyCounts.undo === 0}
+              aria-label="Undo"
+              title="Undo (⌘Z)"
+            >
+              ↶
+            </button>
+            <button
+              type="button"
+              onClick={redo}
+              disabled={historyCounts.redo === 0}
+              aria-label="Redo"
+              title="Redo (⇧⌘Z)"
+            >
+              ↷
+            </button>
+          </div>
           <button
             type="button"
-            onClick={() => void startRender()}
-            disabled={status === "queued" || status === "processing"}
-            className="studio-export"
+            className="studio-ghost"
+            onClick={() => setShowShortcuts((current) => !current)}
+            aria-label="Keyboard shortcuts"
+            aria-expanded={showShortcuts}
+            title="Keyboard shortcuts (?)"
           >
-            Export
+            ?
           </button>
+          {rendering ? (
+            <>
+              <div className="studio-export-busy" aria-hidden="true">
+                <i style={{ width: `${progress}%` }} />
+                <span className="studio-export-spinner" />
+                <span>Exporting {progress}%</span>
+              </div>
+              <button
+                type="button"
+                className="studio-ghost"
+                onClick={() => void cancelRender()}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            status !== "done" && (
+              <button
+                type="button"
+                onClick={() => void startRender()}
+                disabled={saving}
+                className="studio-export"
+                title="Export (⌘↵)"
+              >
+                {status === "error" ? "Retry export" : "Export"}
+              </button>
+            )
+          )}
+          {downloadable && (
+            <a
+              className="studio-download-button"
+              href={`/api/download/${jobId}`}
+              download
+              onClick={() => setDownloaded(true)}
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14" />
+              </svg>
+              Download video
+            </a>
+          )}
+          {status === "done" && downloaded && (
+            <span className="studio-downloaded">✓ Downloaded</span>
+          )}
         </div>
       </header>
 
-      {error && <div className="studio-error" role="alert">{error}</div>}
-      {status && status !== "done" && (
-        <div className="studio-render-progress">
-          <span>Renderizando {progress}%</span>
-          <i style={{ width: `${progress}%` }} />
+      {(rendering || downloadable) && (
+        <div
+          className={`studio-render-progress ${downloadable ? "done" : ""} ${
+            status === "queued" ? "queued" : ""
+          }`}
+          role="progressbar"
+          aria-label="Export progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progress}
+          aria-valuetext={`${stageLabel}, ${progress}%`}
+        >
+          <div className="render-progress-label" aria-live="polite">
+            <strong>{downloadable ? "✓ Video ready" : stageLabel}</strong>
+            <span>
+              {downloadable
+                ? "Use Download video in the top bar to save it. It is deleted from the server after download."
+                : connectionLost
+                  ? "Connection lost, retrying… the export keeps running"
+                  : [`${progress}%`, etaLabel].filter(Boolean).join(" · ")}
+            </span>
+          </div>
+          <div className="render-progress-track">
+            <i style={{ width: `${downloadable ? 100 : progress}%` }} />
+          </div>
         </div>
       )}
-      {status === "done" && (
-        <a className="studio-download" href={`/api/download/${jobId}`}>
-          Video ready — download file
-        </a>
+      {error && (
+        <div className="studio-error" role="alert">
+          <span>{error}</span>
+          {status === "error" && (
+            <button type="button" onClick={() => void startRender()}>
+              Try again
+            </button>
+          )}
+        </div>
+      )}
+      {showShortcuts && (
+        <div className="shortcuts-panel" role="dialog" aria-label="Keyboard shortcuts">
+          <div>
+            <strong>Keyboard shortcuts</strong>
+            <button type="button" onClick={() => setShowShortcuts(false)} aria-label="Close shortcuts">
+              ×
+            </button>
+          </div>
+          <dl>
+            {SHORTCUTS.map(([keys, description]) => (
+              <div key={keys}>
+                <dt>{keys}</dt>
+                <dd>{description}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
       )}
 
       <div
@@ -403,9 +827,23 @@ export default function EditorPage({
             onClick={() =>
               setActiveTool((current) => (current === "style" ? null : "style"))
             }
-            title="Style"
+            aria-label="Caption style"
+            aria-pressed={activeTool === "style"}
+            title="Caption style"
           >
-            ◩
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="3" y="3" width="14" height="6" rx="1.6" />
+              <path d="M17 6h2.2a1.3 1.3 0 0 1 1.3 1.3v3.4a1.3 1.3 0 0 1-1.3 1.3H12a1.3 1.3 0 0 0-1.3 1.3V15" />
+              <rect x="8.7" y="15" width="4" height="6.5" rx="1.1" fill="currentColor" />
+            </svg>
           </button>
           <button
             type="button"
@@ -416,6 +854,8 @@ export default function EditorPage({
               )
             }
             title="Captions"
+            aria-label="Captions"
+            aria-pressed={activeTool === "captions"}
           >
             CC
           </button>
@@ -456,7 +896,7 @@ export default function EditorPage({
             {activeTool === "style" ? (
               <CaptionStylePanel
                 style={captionStyle}
-                onChange={setCaptionStyle}
+                onChange={changeStyle}
               />
             ) : (
               <div className="segments-side-panel">
@@ -482,11 +922,9 @@ export default function EditorPage({
                   <button type="button" onClick={groupWords}>
                     ⧉ Group words into phrases
                   </button>
-                  {beforeGrouping && (
-                    <button type="button" onClick={undoGrouping}>
-                      ↺ Undo
-                    </button>
-                  )}
+                  <button type="button" onClick={downloadSrt}>
+                    ↓ Download SRT
+                  </button>
                 </div>
               </div>
               <div className="side-segment-list">
@@ -500,6 +938,9 @@ export default function EditorPage({
                         selectedIndex === segment.index ? "active" : ""
                       } ${segmentIssues.length ? "has-errors" : ""}`}
                       onClick={() => selectSegment(segment)}
+                      aria-current={
+                        selectedIndex === segment.index ? "true" : undefined
+                      }
                     >
                       <span>
                         #{String(segment.index).padStart(2, "0")}
@@ -568,6 +1009,7 @@ export default function EditorPage({
                 format={format}
                 showGuides={showSafeZone}
                 captionStyle={captionStyle}
+                activeWord={activeWord}
               />
             </div>
           </div>
@@ -577,16 +1019,31 @@ export default function EditorPage({
               {compactTime(currentMs)} / {compactTime(video?.durationMs ?? 0)}
             </span>
             <div>
-              <button type="button" onClick={() => seek(currentMs - 5000)}>↶ 5</button>
+              <button
+                type="button"
+                onClick={() => seek(currentMs - 5000)}
+                aria-label="Back 5 seconds"
+                title="Back 5 seconds (J)"
+              >
+                ↶ 5
+              </button>
               <button
                 type="button"
                 className="play-button"
                 onClick={togglePlayback}
                 aria-label={isPlaying ? "Pause" : "Play"}
+                title="Play or pause (Space)"
               >
                 {isPlaying ? "Ⅱ" : "▶"}
               </button>
-              <button type="button" onClick={() => seek(currentMs + 5000)}>5 ↷</button>
+              <button
+                type="button"
+                onClick={() => seek(currentMs + 5000)}
+                aria-label="Forward 5 seconds"
+                title="Forward 5 seconds (L)"
+              >
+                5 ↷
+              </button>
             </div>
             <span>
               {video?.width ?? 0} × {video?.height ?? 0}
@@ -623,6 +1080,14 @@ export default function EditorPage({
             <div className="segment-editor-actions">
               <button
                 type="button"
+                onClick={() => setFollowPlayback((current) => !current)}
+                aria-pressed={!followPlayback}
+                title="Keep the selected caption while the video plays"
+              >
+                {followPlayback ? "◎ Following video" : "◉ Caption locked"}
+              </button>
+              <button
+                type="button"
                 onClick={() => breakIntoTwoLines(activeSegment)}
               >
                 ↵ Break line
@@ -650,28 +1115,18 @@ export default function EditorPage({
         {activeSegment && (
           <div className="inline-segment-editor">
             <div className="inline-timing">
-              <input
-                key={`start-${activeSegment.index}-${activeSegment.start}`}
-                defaultValue={msToInput(activeSegment.start)}
-                onBlur={(event) => {
-                  const next = inputToMs(event.target.value);
-                  if (!Number.isNaN(next)) {
-                    updateSegment(activeSegment.index, { start: next });
-                  }
-                }}
-                aria-label="Caption start"
+              <TimeField
+                label="Caption start"
+                valueMs={activeSegment.start}
+                playheadMs={currentMs}
+                onCommit={(next) => updateSegment(activeSegment.index, { start: next })}
               />
               <span>→</span>
-              <input
-                key={`end-${activeSegment.index}-${activeSegment.end}`}
-                defaultValue={msToInput(activeSegment.end)}
-                onBlur={(event) => {
-                  const next = inputToMs(event.target.value);
-                  if (!Number.isNaN(next)) {
-                    updateSegment(activeSegment.index, { end: next });
-                  }
-                }}
-                aria-label="Caption end"
+              <TimeField
+                label="Caption end"
+                valueMs={activeSegment.end}
+                playheadMs={currentMs}
+                onCommit={(next) => updateSegment(activeSegment.index, { end: next })}
               />
             </div>
             <textarea
@@ -687,9 +1142,15 @@ export default function EditorPage({
               className={
                 issueMap.has(activeSegment.index) ? "inline-issue error" : "inline-issue"
               }
+              aria-live="polite"
             >
               {issueMap.get(activeSegment.index)?.join(" ") ??
-                `${wrapText(activeSegment.text).lines.length}/2 lines`}
+                (() => {
+                  const { lines } = wrapText(activeSegment.text);
+                  return `${lines.length}/${MAX_LINES} lines · ${lines
+                    .map((line) => line.length)
+                    .join(" / ")} of ${MAX_CHARS_PER_LINE} chars`;
+                })()}
             </span>
           </div>
         )}

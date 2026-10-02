@@ -67,41 +67,67 @@ function UploadIcon({ kind }: { kind: "video" | "caption" }) {
 
 export default function UploadPage() {
   const router = useRouter();
-  const videoInputRef = useRef<HTMLInputElement>(null);
-  const srtInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const inspectionIdRef = useRef(0);
   const [video, setVideo] = useState<File | null>(null);
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const [srt, setSrt] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [inspecting, setInspecting] = useState(false);
-  const [dragging, setDragging] = useState<"video" | "caption" | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function selectVideo(file: File | null) {
     if (!file) return;
-    setError(null);
+    const inspectionId = ++inspectionIdRef.current;
     setMetadata(null);
     setInspecting(true);
     try {
       const nextMetadata = await inspectVideo(file);
+      if (inspectionId !== inspectionIdRef.current) return;
       setVideo(file);
       setMetadata(nextMetadata);
     } catch (err) {
+      if (inspectionId !== inspectionIdRef.current) return;
       setVideo(null);
       setError(err instanceof Error ? err.message : "Invalid video.");
     } finally {
-      setInspecting(false);
+      if (inspectionId === inspectionIdRef.current) setInspecting(false);
     }
   }
 
-  function selectSrt(file: File | null) {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".srt")) {
-      setError("Select a caption file in .srt format.");
+  function isVideoFile(file: File) {
+    return (
+      file.type.startsWith("video/") ||
+      /\.(mp4|mov|webm)$/i.test(file.name)
+    );
+  }
+
+  async function selectFiles(files: FileList | File[]) {
+    const selectedFiles = Array.from(files);
+    if (selectedFiles.length === 0) return;
+
+    const videos = selectedFiles.filter(isVideoFile);
+    const captions = selectedFiles.filter((file) =>
+      file.name.toLowerCase().endsWith(".srt"),
+    );
+    const recognized = new Set([...videos, ...captions]);
+    const unsupported = selectedFiles.filter((file) => !recognized.has(file));
+
+    if (unsupported.length > 0) {
+      setError(
+        `File not recognized: ${unsupported.map((file) => file.name).join(", ")}. Select one video and one .srt file.`,
+      );
       return;
     }
+    if (videos.length > 1 || captions.length > 1) {
+      setError("Select only one video and one .srt caption file.");
+      return;
+    }
+
     setError(null);
-    setSrt(file);
+    if (captions[0]) setSrt(captions[0]);
+    if (videos[0]) await selectVideo(videos[0]);
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -219,115 +245,93 @@ export default function UploadPage() {
                 <span className="panel-kicker">START HERE</span>
                 <h2>Create your review workspace</h2>
               </div>
-              <span className="step-progress">2 files</span>
+              <span className="step-progress">
+                {Number(Boolean(video)) + Number(Boolean(srt))}/2 files
+              </span>
             </div>
-            <div className="upload-grid">
-          <section className="upload-step">
-            <div className="step-heading">
-              <span className="step-number">1</span>
-              <div>
-                <h2>Add the video</h2>
-                <p>MP4, MOV, or WebM · up to 600 MB</p>
-              </div>
-            </div>
-            <button
-              type="button"
-              className={`dropzone ${video ? "has-file" : ""} ${
-                dragging === "video" ? "is-dragging" : ""
-              }`}
-              onClick={() => videoInputRef.current?.click()}
-              onDragEnter={(e) => {
-                e.preventDefault();
-                setDragging("video");
-              }}
-              onDragOver={(e) => e.preventDefault()}
-              onDragLeave={() => setDragging(null)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDragging(null);
-                void selectVideo(e.dataTransfer.files[0] ?? null);
-              }}
-            >
-              <input
-                ref={videoInputRef}
-                type="file"
-                accept="video/mp4,video/quicktime,video/webm,video/*"
-                onChange={(e) => void selectVideo(e.target.files?.[0] ?? null)}
-                hidden
-              />
-              <span className="dropzone-icon"><UploadIcon kind="video" /></span>
-              {inspecting ? (
-                <>
-                  <strong>Analyzing the video…</strong>
-                  <span>This only takes a few seconds</span>
-                </>
-              ) : video && metadata ? (
-                <>
-                  <strong className="file-name">{video.name}</strong>
-                  <span>{formatBytes(video.size)} · {formatDuration(metadata.durationMs)}</span>
-                  <span className={`format-badge ${metadata.format}`}>
-                    {metadata.format === "long-form" ? "▭ Long form" : "▯ Social"}
-                    <small>{metadata.width} × {metadata.height}</small>
-                  </span>
-                </>
-              ) : (
-                <>
-                  <strong>Drag the video here</strong>
-                  <span>or click to select</span>
-                </>
-              )}
-            </button>
-          </section>
 
-          <section className="upload-step">
-            <div className="step-heading">
-              <span className="step-number">2</span>
-              <div>
-                <h2>Add the captions</h2>
-                <p>SRT file · up to 2 MB</p>
-              </div>
-            </div>
             <button
               type="button"
-              className={`dropzone ${srt ? "has-file" : ""} ${
-                dragging === "caption" ? "is-dragging" : ""
+              className={`dropzone combined-dropzone ${
+                video || srt ? "has-file" : ""
+              } ${
+                dragging ? "is-dragging" : ""
               }`}
-              onClick={() => srtInputRef.current?.click()}
+              onClick={() => fileInputRef.current?.click()}
               onDragEnter={(e) => {
                 e.preventDefault();
-                setDragging("caption");
+                setDragging(true);
               }}
               onDragOver={(e) => e.preventDefault()}
-              onDragLeave={() => setDragging(null)}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                  setDragging(false);
+                }
+              }}
               onDrop={(e) => {
                 e.preventDefault();
-                setDragging(null);
-                selectSrt(e.dataTransfer.files[0] ?? null);
+                setDragging(false);
+                void selectFiles(e.dataTransfer.files);
               }}
             >
               <input
-                ref={srtInputRef}
+                ref={fileInputRef}
                 type="file"
-                accept=".srt,application/x-subrip,text/plain"
-                onChange={(e) => selectSrt(e.target.files?.[0] ?? null)}
+                accept="video/mp4,video/quicktime,video/webm,video/*,.srt,application/x-subrip"
+                multiple
+                onChange={(e) => {
+                  if (e.target.files) void selectFiles(e.target.files);
+                  e.target.value = "";
+                }}
                 hidden
               />
-              <span className="dropzone-icon"><UploadIcon kind="caption" /></span>
-              {srt ? (
-                <>
-                  <strong className="file-name">{srt.name}</strong>
-                  <span>{formatBytes(srt.size)} · SRT file</span>
-                  <span className="file-ready">✓ Ready to review</span>
-                </>
-              ) : (
-                <>
-                  <strong>Drag the SRT file here</strong>
-                  <span>or click to select</span>
-                </>
-              )}
+              <div className="combined-dropzone-heading">
+                <span className="dropzone-icon">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" />
+                    <path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
+                  </svg>
+                </span>
+                <div>
+                  <strong>Drag the video and captions here</strong>
+                  <span>or click to select both files at once</span>
+                </div>
+              </div>
+
+              <div className="detected-files">
+                <div className={`detected-file ${video && metadata ? "is-ready" : ""}`}>
+                  <span className="detected-file-icon"><UploadIcon kind="video" /></span>
+                  <span className="detected-file-copy">
+                    <strong className="file-name">
+                      {inspecting ? "Analyzing video…" : video?.name ?? "Video"}
+                    </strong>
+                    <small>
+                      {video && metadata
+                        ? `${formatBytes(video.size)} · ${formatDuration(metadata.durationMs)}`
+                        : inspecting
+                          ? "Detecting format"
+                          : "MP4, MOV, or WebM · up to 600 MB"}
+                    </small>
+                  </span>
+                  <span className="detected-file-status">
+                    {video && metadata ? "✓ Detected" : "Required"}
+                  </span>
+                </div>
+
+                <div className={`detected-file ${srt ? "is-ready" : ""}`}>
+                  <span className="detected-file-icon"><UploadIcon kind="caption" /></span>
+                  <span className="detected-file-copy">
+                    <strong className="file-name">{srt?.name ?? "Captions"}</strong>
+                    <small>
+                      {srt ? `${formatBytes(srt.size)} · SRT file` : "SRT · up to 2 MB"}
+                    </small>
+                  </span>
+                  <span className="detected-file-status">
+                    {srt ? "✓ Detected" : "Required"}
+                  </span>
+                </div>
+              </div>
             </button>
-          </section>
-            </div>
 
             {metadata && (
               <div className="detection-note" role="status">

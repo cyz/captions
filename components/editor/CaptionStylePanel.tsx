@@ -1,11 +1,13 @@
 "use client";
 
 import {
+  QUICK_STYLES,
   type CaptionStyle,
 } from "@/lib/caption-style";
 
 const TEXT_COLORS = ["#ffffff", "#f4f1e8", "#f8d849", "#f65282"];
 const BACKGROUND_COLORS = ["#111318", "#282c34", "#172033", "#5c2337"];
+const HIGHLIGHT_COLORS = ["#f8d849", "#f65282", "#4ade80", "#38bdf8"];
 
 interface CaptionStylePanelProps {
   style: CaptionStyle;
@@ -24,6 +26,35 @@ export default function CaptionStylePanel({
         <span>FORMATTING</span>
         <h2>Caption appearance</h2>
         <p>Bold text with a solid background box.</p>
+      </div>
+
+      <div className="style-section">
+        <span className="style-section-title">PRESETS</span>
+        <div className="style-presets">
+          {QUICK_STYLES.map((preset) => {
+            const look = { ...style, ...preset.patch };
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => patch(preset.patch)}
+                aria-label={`Apply ${preset.label} style`}
+                title={preset.label}
+              >
+                <span
+                  style={{
+                    color: look.textColor,
+                    background: look.backgroundColor,
+                    textTransform: look.uppercase ? "uppercase" : "none",
+                  }}
+                >
+                  Aa
+                </span>
+                <small>{preset.label}</small>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="style-section">
@@ -70,13 +101,29 @@ export default function CaptionStylePanel({
               {alignment === "left" ? "≡" : alignment === "center" ? "☰" : "≣"}
             </button>
           ))}
-          <button
-            type="button"
-            className={style.uppercase ? "active" : ""}
-            onClick={() => patch({ uppercase: !style.uppercase })}
-          >
-            AA
-          </button>
+        </div>
+        <div className="swatch-field">
+          <span>Letter case</span>
+          <div className="segmented-control case-control" role="group" aria-label="Letter case">
+            <button
+              type="button"
+              className={!style.uppercase ? "active" : ""}
+              onClick={() => patch({ uppercase: false })}
+              aria-pressed={!style.uppercase}
+            >
+              <span className="case-sample" aria-hidden="true">Aa</span>
+              <span>Normal</span>
+            </button>
+            <button
+              type="button"
+              className={style.uppercase ? "active" : ""}
+              onClick={() => patch({ uppercase: true })}
+              aria-pressed={style.uppercase}
+            >
+              <span className="case-sample" aria-hidden="true">AA</span>
+              <span>Uppercase</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -141,18 +188,84 @@ export default function CaptionStylePanel({
             </label>
           </div>
         </div>
-        <label className="range-field">
-          <span>Background opacity <b>{Math.round(style.backgroundOpacity * 100)}%</b></span>
-          <input
-            type="range"
-            min="20"
-            max="100"
-            value={style.backgroundOpacity * 100}
-            onChange={(event) =>
-              patch({ backgroundOpacity: Number(event.target.value) / 100 })
-            }
-          />
-        </label>
+      </div>
+
+      <div className="style-section">
+        <span className="style-section-title">WORD HIGHLIGHT</span>
+        <div className="segmented-control case-control" role="group" aria-label="Word highlight">
+          <button
+            type="button"
+            className={!style.wordHighlight ? "active" : ""}
+            onClick={() => patch({ wordHighlight: false })}
+            aria-pressed={!style.wordHighlight}
+          >
+            Off
+          </button>
+          <button
+            type="button"
+            className={style.wordHighlight ? "active" : ""}
+            onClick={() => patch({ wordHighlight: true })}
+            aria-pressed={style.wordHighlight}
+          >
+            Highlight
+          </button>
+        </div>
+        {style.wordHighlight && (
+          <>
+            <div className="segmented-control case-control" role="group" aria-label="Highlight style">
+              <button
+                type="button"
+                className={style.highlightMode === "text" ? "active" : ""}
+                onClick={() => patch({ highlightMode: "text" })}
+                aria-pressed={style.highlightMode === "text"}
+              >
+                Text color
+              </button>
+              <button
+                type="button"
+                className={style.highlightMode === "pill" ? "active" : ""}
+                onClick={() => patch({ highlightMode: "pill" })}
+                aria-pressed={style.highlightMode === "pill"}
+              >
+                Pill
+              </button>
+            </div>
+            <div className="swatch-field">
+              <span>Highlight color</span>
+              <div className="color-swatches">
+                {HIGHLIGHT_COLORS.map((color) => (
+                  <button
+                    key={color}
+                    type="button"
+                    className={style.highlightColor === color ? "active" : ""}
+                    style={{ background: color }}
+                    onClick={() => patch({ highlightColor: color })}
+                    aria-label={`Highlight color ${color}`}
+                  />
+                ))}
+                <label
+                  className="custom-color-picker"
+                  title="Custom highlight color"
+                  style={{ background: style.highlightColor }}
+                >
+                  <input
+                    type="color"
+                    value={style.highlightColor}
+                    onChange={(event) =>
+                      patch({ highlightColor: event.target.value })
+                    }
+                    aria-label="Custom highlight color"
+                  />
+                  <span>+</span>
+                </label>
+              </div>
+            </div>
+            <p className="fixed-style-note">
+              Uses the word timing from the SRT when each word is its own caption,
+              otherwise estimates it from word length. Export takes longer.
+            </p>
+          </>
+        )}
       </div>
 
       <div className="style-section">

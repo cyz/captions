@@ -7,6 +7,7 @@ export type CaptionFont =
   | "Trebuchet MS"
   | "Segoe UI";
 export type CaptionAlignment = "left" | "center" | "right";
+export type HighlightMode = "text" | "pill";
 
 export interface CaptionStyle {
   preset: CaptionPreset;
@@ -18,11 +19,14 @@ export interface CaptionStyle {
   outlineColor: string;
   outlineWidth: number;
   backgroundColor: string;
-  backgroundOpacity: number;
   backgroundEnabled: boolean;
   uppercase: boolean;
   alignment: CaptionAlignment;
   verticalPosition: number;
+  // Highlights the word being spoken.
+  wordHighlight: boolean;
+  highlightMode: HighlightMode;
+  highlightColor: string;
 }
 
 export const CAPTION_PRESETS: Record<CaptionPreset, CaptionStyle> = {
@@ -36,17 +40,63 @@ export const CAPTION_PRESETS: Record<CaptionPreset, CaptionStyle> = {
     outlineColor: "#111318",
     outlineWidth: 0,
     backgroundColor: "#111318",
-    backgroundOpacity: 0.86,
     backgroundEnabled: true,
     uppercase: false,
     alignment: "center",
     verticalPosition: 78,
+    wordHighlight: false,
+    highlightMode: "text",
+    highlightColor: "#f8d849",
   },
 };
 
 export const DEFAULT_CAPTION_STYLE = CAPTION_PRESETS.box;
 
+// Quick looks built only from fields the renderer already supports.
+export const QUICK_STYLES: Array<{
+  id: string;
+  label: string;
+  patch: Partial<CaptionStyle>;
+}> = [
+  {
+    id: "classic",
+    label: "Classic",
+    patch: { textColor: "#ffffff", backgroundColor: "#111318", uppercase: false },
+  },
+  {
+    id: "light",
+    label: "Light",
+    patch: { textColor: "#111318", backgroundColor: "#ffffff", uppercase: false },
+  },
+  {
+    id: "highlight",
+    label: "Highlight",
+    patch: { textColor: "#f8d849", backgroundColor: "#111318", uppercase: true },
+  },
+  {
+    id: "vscode",
+    label: "VS Code",
+    patch: { textColor: "#ffffff", backgroundColor: "#007acc", uppercase: false },
+  },
+  {
+    id: "pink",
+    label: "Bold pink",
+    patch: { textColor: "#ffffff", backgroundColor: "#f65282", uppercase: false },
+  },
+];
+
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+// Dark or white text, whichever reads better on the given hex background.
+export function readableTextOn(hex: string): string {
+  const value = Number.parseInt(hex.slice(1), 16);
+  const luminance =
+    (0.299 * (value >> 16) +
+      0.587 * ((value >> 8) & 255) +
+      0.114 * (value & 255)) /
+    255;
+  return luminance > 0.6 ? "#111318" : "#ffffff";
+}
 
 export function normalizeCaptionStyle(value: unknown): CaptionStyle {
   if (!value || typeof value !== "object") return { ...DEFAULT_CAPTION_STYLE };
@@ -82,12 +132,6 @@ export function normalizeCaptionStyle(value: unknown): CaptionStyle {
     outlineColor: base.outlineColor,
     outlineWidth: 0,
     backgroundColor: color(input.backgroundColor, base.backgroundColor),
-    backgroundOpacity: number(
-      input.backgroundOpacity,
-      0,
-      1,
-      base.backgroundOpacity,
-    ),
     backgroundEnabled: true,
     uppercase:
       typeof input.uppercase === "boolean" ? input.uppercase : base.uppercase,
@@ -100,5 +144,11 @@ export function normalizeCaptionStyle(value: unknown): CaptionStyle {
     verticalPosition: Math.round(
       number(input.verticalPosition, 15, 90, base.verticalPosition),
     ),
+    wordHighlight:
+      typeof input.wordHighlight === "boolean"
+        ? input.wordHighlight
+        : base.wordHighlight,
+    highlightMode: input.highlightMode === "pill" ? "pill" : "text",
+    highlightColor: color(input.highlightColor, base.highlightColor),
   };
 }

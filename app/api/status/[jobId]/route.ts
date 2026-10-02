@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { jobsAhead } from "@/lib/queue";
 import { readMeta } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -15,5 +16,6 @@ export async function GET(
     status: meta.status,
     progress: meta.progress,
     error: meta.error ?? null,
+    ahead: meta.status === "queued" ? await jobsAhead(jobId) : null,
   });
 }

@@ -1,11 +1,12 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { createCanvas, GlobalFonts } from "@napi-rs/canvas";
-import { Segment, wrapText } from "./srt";
+import { Segment, wordTimings, wrapText } from "./srt";
 import { getSafeZoneProfile } from "./safezone";
 import { classifyVideoFormat } from "./video-format";
 import {
   normalizeCaptionStyle,
+  readableTextOn,
   type CaptionStyle,
 } from "./caption-style";
 
@@ -91,14 +92,28 @@ export interface Overlay {
   end: number; // ms
 }
 
-// Render one transparent full-frame PNG per segment, with the caption text laid
-// out inside the vertical safe zone (white fill, black outline, soft shadow).
+// Fully transparent frame used by the overlay timeline between captions.
+export async function writeBlankOverlay(
+  outDir: string,
+  width: number,
+  height: number,
+): Promise<string> {
+  await fs.mkdir(outDir, { recursive: true });
+  const blankPath = path.join(outDir, "blank.png");
+  await fs.writeFile(blankPath, createCanvas(width, height).toBuffer("image/png"));
+  return blankPath;
+}
+
+// Render transparent full-frame PNGs with the caption text laid out inside the
+// vertical safe zone. With word highlight on, each segment yields one PNG per
+// spoken word, active only while that word is spoken.
 export async function renderOverlays(
   segments: Segment[],
   outDir: string,
   width: number,
   height: number,
   captionStyle?: CaptionStyle,
+  onProgress?: (done: number, total: number) => void,
 ): Promise<Overlay[]> {
   const style = normalizeCaptionStyle(captionStyle);
   const fontFamily = await ensureFont(style.fontFamily);
@@ -107,7 +122,6 @@ export async function renderOverlays(
   const safeZone = getSafeZoneProfile(format);
   const referenceScale = width / 1080;
   const fontSize = Math.round(style.fontSize * referenceScale);
-  const lineHeight = Math.round(fontSize * 1.18);
   const outline = Math.round(style.outlineWidth * referenceScale);
   const safeLeft = width * safeZone.leftMargin;
   const safeWidth =
@@ -118,74 +132,135 @@ export async function renderOverlays(
 
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
+    onProgress?.(i, segments.length);
     const text = style.uppercase ? seg.text.toLocaleUpperCase() : seg.text;
     const { lines } = wrapText(text);
     if (lines.length === 0 || lines.join("").trim() === "") continue;
 
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext("2d");
-    ctx.font = `${style.fontWeight} ${fontSize}px ${fontFamily}`;
-    ctx.textAlign = style.alignment;
-    ctx.textBaseline = "alphabetic";
-    ctx.lineJoin = "round";
+    // Time windows with the index of the highlighted word (null = no highlight).
+    const timings = style.wordHighlight ? wordTimings(seg) : [];
+    const states: Array<{ start: number; end: number; active: number | null }> =
+      timings.length > 0
+        ? timings.map((word, wordIndex) => ({
+            start: word.start,
+            end: word.end,
+            active: wordIndex,
+          }))
+        : [{ start: seg.start, end: seg.end, active: null }];
 
-    // Fit-to-safe-width guard: shrink font if a line overflows horizontally.
-    let usedFont = fontSize;
-    for (const line of lines) {
-      let w = ctx.measureText(line).width;
-      while (w > safeWidth && usedFont > 24) {
-        usedFont -= 2;
-        ctx.font = `${style.fontWeight} ${usedFont}px ${fontFamily}`;
-        w = ctx.measureText(line).width;
-      }
-    }
-    const usedLineHeight = Math.round(usedFont * 1.25);
+    for (let s = 0; s < states.length; s++) {
+      const state = states[s];
+      if (state.end <= state.start) continue;
 
-    // Center on the safe-zone block, not the frame (safe margins are asymmetric).
-    const textX =
-      style.alignment === "left"
-        ? safeLeft
-        : style.alignment === "right"
-          ? safeLeft + safeWidth
-          : safeLeft + safeWidth / 2;
-    const padY = Math.round(usedFont * 0.18);
-    const radius = Math.round(usedFont * 0.14);
-    const ascent = usedFont * 0.8;
-    const descent = usedFont * 0.25;
+      const canvas = createCanvas(width, height);
+      const ctx = canvas.getContext("2d");
+      ctx.font = `${style.fontWeight} ${fontSize}px ${fontFamily}`;
+      ctx.textAlign = state.active === null ? style.alignment : "left";
+      ctx.textBaseline = "alphabetic";
+      ctx.lineJoin = "round";
 
-    const topY = baselineBottom - (lines.length - 1) * usedLineHeight;
-    const boxTop = topY - ascent - padY;
-    const boxBottom = baselineBottom + descent + padY;
-    if (style.backgroundEnabled) {
-      const alpha = Math.round(style.backgroundOpacity * 255)
-        .toString(16)
-        .padStart(2, "0");
-      ctx.fillStyle = `${style.backgroundColor}${alpha}`;
-      ctx.beginPath();
-      ctx.roundRect(safeLeft, boxTop, safeWidth, boxBottom - boxTop, radius);
-      ctx.fill();
-    }
-
-    lines.forEach((line, li) => {
-      const fromBottom = lines.length - 1 - li;
-      const y = baselineBottom - fromBottom * usedLineHeight;
-      const drawText = (value: string, x: number, color: string) => {
-        if (outline > 0) {
-          ctx.lineWidth = outline * 2;
-          ctx.strokeStyle = style.outlineColor;
-          ctx.strokeText(value, x, y);
+      // Fit-to-safe-width guard: shrink font if a line overflows horizontally.
+      let usedFont = fontSize;
+      for (const line of lines) {
+        let w = ctx.measureText(line).width;
+        while (w > safeWidth && usedFont > 24) {
+          usedFont -= 2;
+          ctx.font = `${style.fontWeight} ${usedFont}px ${fontFamily}`;
+          w = ctx.measureText(line).width;
         }
-        ctx.fillStyle = color;
-        ctx.fillText(value, x, y);
-      };
+      }
+      const usedLineHeight = Math.round(usedFont * 1.25);
 
-      drawText(line, textX, style.textColor);
-    });
+      // Center on the safe-zone block, not the frame (safe margins are asymmetric).
+      const textX =
+        style.alignment === "left"
+          ? safeLeft
+          : style.alignment === "right"
+            ? safeLeft + safeWidth
+            : safeLeft + safeWidth / 2;
+      const padY = Math.round(usedFont * 0.28);
+      const radius = Math.round(usedFont * 0.14);
+      const ascent = usedFont * 0.8;
+      const descent = usedFont * 0.25;
 
-    const filePath = path.join(outDir, `ov_${String(i).padStart(4, "0")}.png`);
-    await fs.writeFile(filePath, canvas.toBuffer("image/png"));
-    overlays.push({ path: filePath, start: seg.start, end: seg.end });
+      const topY = baselineBottom - (lines.length - 1) * usedLineHeight;
+      const boxTop = topY - ascent - padY;
+      const boxBottom = baselineBottom + descent + padY;
+      if (style.backgroundEnabled) {
+        ctx.fillStyle = style.backgroundColor;
+        ctx.beginPath();
+        ctx.roundRect(safeLeft, boxTop, safeWidth, boxBottom - boxTop, radius);
+        ctx.fill();
+      }
+
+      let wordIndex = 0;
+      lines.forEach((line, li) => {
+        const fromBottom = lines.length - 1 - li;
+        const y = baselineBottom - fromBottom * usedLineHeight;
+        const drawText = (value: string, x: number, color: string) => {
+          if (outline > 0) {
+            ctx.lineWidth = outline * 2;
+            ctx.strokeStyle = style.outlineColor;
+            ctx.strokeText(value, x, y);
+          }
+          ctx.fillStyle = color;
+          ctx.fillText(value, x, y);
+        };
+
+        if (state.active === null) {
+          drawText(line, textX, style.textColor);
+          return;
+        }
+
+        // Word by word, positioned as if the whole line were drawn at once.
+        const words = line.split(" ").filter(Boolean);
+        const lineWidth = ctx.measureText(words.join(" ")).width;
+        const lineLeft =
+          style.alignment === "left"
+            ? safeLeft
+            : style.alignment === "right"
+              ? safeLeft + safeWidth - lineWidth
+              : safeLeft + (safeWidth - lineWidth) / 2;
+        words.forEach((word, position) => {
+          const x =
+            lineLeft +
+            (position === 0
+              ? 0
+              : ctx.measureText(`${words.slice(0, position).join(" ")} `).width);
+          const isActive = wordIndex === state.active;
+          wordIndex += 1;
+          if (isActive && style.highlightMode === "pill") {
+            const padX = Math.round(usedFont * 0.1);
+            ctx.fillStyle = style.highlightColor;
+            ctx.beginPath();
+            ctx.roundRect(
+              x - padX,
+              y - ascent - padY / 2,
+              ctx.measureText(word).width + padX * 2,
+              ascent + descent + padY,
+              radius,
+            );
+            ctx.fill();
+            drawText(word, x, readableTextOn(style.highlightColor));
+          } else {
+            drawText(
+              word,
+              x,
+              isActive ? style.highlightColor : style.textColor,
+            );
+          }
+        });
+      });
+
+      const filePath = path.join(
+        outDir,
+        `ov_${String(i).padStart(4, "0")}_${String(s).padStart(3, "0")}.png`,
+      );
+      await fs.writeFile(filePath, canvas.toBuffer("image/png"));
+      overlays.push({ path: filePath, start: state.start, end: state.end });
+    }
   }
 
+  onProgress?.(segments.length, segments.length);
   return overlays;
 }
