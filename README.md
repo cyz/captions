@@ -184,6 +184,12 @@ The included deployment targets the `devtools` subscription in the `Advocates at
 
 The script refuses to deploy if the active subscription does not belong to the expected tenant. It builds and deploys an immutable image tag derived from the latest application commit. Container Apps pulls the image through a dedicated managed identity, so registry passwords are not enabled or stored.
 
+Pushes to the `main` branch automatically run `.github/workflows/deploy-azure.yml`.
+The workflow authenticates with Azure through GitHub OIDC, builds an image tagged
+with the pushed commit SHA, and updates the Container App and render job. The
+repository must define the `AZURE_CLIENT_ID`, `AZURE_SUBSCRIPTION_ID`, and
+`AZURE_TENANT_ID` GitHub Actions variables.
+
 ### Netlify
 
 Netlify can deploy the interface and Next.js route handlers, but the current video-processing backend is not compatible with its serverless runtime. Upload and rendering require persistent storage, FFmpeg and ffprobe binaries, and a worker that continues running after the API response. Use a persistent Node.js or container host, or move storage and rendering to dedicated external services before using Netlify in production.
