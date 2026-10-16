@@ -209,7 +209,9 @@ export async function burnCaptions(opts: {
   if (overlays.length > 0) {
     args.push("-f", "concat", "-safe", "0", "-i", await writeOverlayTimeline(overlays, blank));
     graph.push(
-      `[${videoLabel}][1:v]overlay=0:0:format=auto:eof_action=repeat[vout]`,
+      // shortest=1 ends the output with the video; otherwise older FFmpeg keeps the
+      // overlay timeline (last caption plus a blank frame) running past the end.
+      `[${videoLabel}][1:v]overlay=0:0:format=auto:eof_action=repeat:shortest=1[vout]`,
     );
     videoLabel = "vout";
   }
