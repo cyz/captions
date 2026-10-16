@@ -3,16 +3,29 @@ import path from "path";
 import { createCanvas, GlobalFonts } from "@napi-rs/canvas";
 import { Segment, wordTimings, wrapText } from "./srt";
 import { getSafeZoneProfile } from "./safezone";
-import { classifyVideoFormat } from "./video-format";
+import { classifyVideoFormat, getFormatProfile } from "./video-format";
 import {
   normalizeCaptionStyle,
   readableTextOn,
   type CaptionStyle,
 } from "./caption-style";
 
-// Candidate bold fonts. Production should bundle Inter/Montserrat in the repo
-// for deterministic rendering; these system paths are the MVP fallback.
+const BUNDLED_FONT_DIR = path.join(process.cwd(), "public", "fonts");
+
+// Fonts shipped with the app render identically on every host.
+const BUNDLED_FONT_FILES: Partial<Record<CaptionStyle["fontFamily"], string>> = {
+  Inter: "inter-latin-800-normal.woff2",
+  Montserrat: "montserrat-latin-800-normal.woff2",
+  "JetBrains Mono": "jetbrains-mono-latin-800-normal.woff2",
+  "Cascadia Code": "cascadia-code-latin-700-normal.woff2",
+};
+
+// Candidate bold system fonts for the families that are not bundled.
 const SYSTEM_FONT_PATHS: Record<CaptionStyle["fontFamily"], string[]> = {
+  Inter: [],
+  Montserrat: [],
+  "JetBrains Mono": [],
+  "Cascadia Code": [],
   Arial: [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
@@ -57,8 +70,13 @@ async function ensureFont(fontFamily: CaptionStyle["fontFamily"]): Promise<strin
   if (cached) return cached;
 
   const alias = `Caption${fontFamily.replace(/\s+/g, "")}`;
+  const bundled = BUNDLED_FONT_FILES[fontFamily];
   const candidates = [
-    ...new Set([...SYSTEM_FONT_PATHS[fontFamily], ...FALLBACK_FONT_PATHS]),
+    ...new Set([
+      ...(bundled ? [path.join(BUNDLED_FONT_DIR, bundled)] : []),
+      ...SYSTEM_FONT_PATHS[fontFamily],
+      ...FALLBACK_FONT_PATHS,
+    ]),
   ];
   for (const candidate of candidates) {
     try {
@@ -115,17 +133,23 @@ export async function renderOverlays(
   captionStyle?: CaptionStyle,
   onProgress?: (done: number, total: number) => void,
 ): Promise<Overlay[]> {
-  const style = normalizeCaptionStyle(captionStyle);
+  const format = classifyVideoFormat(width, height);
+  const profile = getFormatProfile(format);
+  const style = normalizeCaptionStyle(captionStyle, format);
   const fontFamily = await ensureFont(style.fontFamily);
   await fs.mkdir(outDir, { recursive: true });
-  const format = classifyVideoFormat(width, height);
   const safeZone = getSafeZoneProfile(format);
-  const referenceScale = width / 1080;
+  const referenceScale = width / profile.referenceWidth;
   const fontSize = Math.round(style.fontSize * referenceScale);
   const outline = Math.round(style.outlineWidth * referenceScale);
   const safeLeft = width * safeZone.leftMargin;
   const safeWidth =
     width * (1 - safeZone.leftMargin - safeZone.rightMargin);
+  const hug = profile.boxMode === "hug";
+  // In hug mode the box is padded around the text, so text lays out inside it.
+  const padX = hug ? Math.round(fontSize * 0.45) : 0;
+  const textLeft = safeLeft + padX;
+  const textWidth = safeWidth - padX * 2;
   const baselineBottom = Math.round(height * (style.verticalPosition / 100));
 
   const overlays: Overlay[] = [];
@@ -134,7 +158,7 @@ export async function renderOverlays(
     const seg = segments[i];
     onProgress?.(i, segments.length);
     const text = style.uppercase ? seg.text.toLocaleUpperCase() : seg.text;
-    const { lines } = wrapText(text);
+    const { lines } = wrapText(text, format);
     if (lines.length === 0 || lines.join("").trim() === "") continue;
 
     // Time windows with the index of the highlighted word (null = no highlight).
@@ -163,7 +187,7 @@ export async function renderOverlays(
       let usedFont = fontSize;
       for (const line of lines) {
         let w = ctx.measureText(line).width;
-        while (w > safeWidth && usedFont > 24) {
+        while (w > textWidth && usedFont > 24) {
           usedFont -= 2;
           ctx.font = `${style.fontWeight} ${usedFont}px ${fontFamily}`;
           w = ctx.measureText(line).width;
@@ -174,10 +198,10 @@ export async function renderOverlays(
       // Center on the safe-zone block, not the frame (safe margins are asymmetric).
       const textX =
         style.alignment === "left"
-          ? safeLeft
+          ? textLeft
           : style.alignment === "right"
-            ? safeLeft + safeWidth
-            : safeLeft + safeWidth / 2;
+            ? textLeft + textWidth
+            : textLeft + textWidth / 2;
       const padY = Math.round(usedFont * 0.28);
       const radius = Math.round(usedFont * 0.14);
       const ascent = usedFont * 0.8;
@@ -187,9 +211,23 @@ export async function renderOverlays(
       const boxTop = topY - ascent - padY;
       const boxBottom = baselineBottom + descent + padY;
       if (style.backgroundEnabled) {
+        let boxLeft = safeLeft;
+        let boxWidth = safeWidth;
+        if (hug) {
+          const widest = Math.max(
+            ...lines.map((line) => ctx.measureText(line).width),
+          );
+          boxWidth = Math.min(safeWidth, Math.ceil(widest) + padX * 2);
+          boxLeft =
+            style.alignment === "left"
+              ? safeLeft
+              : style.alignment === "right"
+                ? safeLeft + safeWidth - boxWidth
+                : safeLeft + (safeWidth - boxWidth) / 2;
+        }
         ctx.fillStyle = style.backgroundColor;
         ctx.beginPath();
-        ctx.roundRect(safeLeft, boxTop, safeWidth, boxBottom - boxTop, radius);
+        ctx.roundRect(boxLeft, boxTop, boxWidth, boxBottom - boxTop, radius);
         ctx.fill();
       }
 
@@ -217,10 +255,10 @@ export async function renderOverlays(
         const lineWidth = ctx.measureText(words.join(" ")).width;
         const lineLeft =
           style.alignment === "left"
-            ? safeLeft
+            ? textLeft
             : style.alignment === "right"
-              ? safeLeft + safeWidth - lineWidth
-              : safeLeft + (safeWidth - lineWidth) / 2;
+              ? textLeft + textWidth - lineWidth
+              : textLeft + (textWidth - lineWidth) / 2;
         words.forEach((word, position) => {
           const x =
             lineLeft +

@@ -1,13 +1,15 @@
 "use client";
 
 import {
+  CAPTION_FONTS,
   QUICK_STYLES,
+  cssFontStack,
   type CaptionStyle,
 } from "@/lib/caption-style";
 
-const TEXT_COLORS = ["#ffffff", "#f4f1e8", "#f8d849", "#f65282"];
-const BACKGROUND_COLORS = ["#111318", "#282c34", "#172033", "#5c2337"];
-const HIGHLIGHT_COLORS = ["#f8d849", "#f65282", "#4ade80", "#38bdf8"];
+const TEXT_COLORS = ["#ffffff", "#f4f1e8", "#f8d849", "#f65282", "#d4d4d4", "#1e1e1e"];
+const BACKGROUND_COLORS = ["#111318", "#282c34", "#172033", "#5c2337", "#0078d4", "#008367"];
+const HIGHLIGHT_COLORS = ["#f8d849", "#f65282", "#4ade80", "#4daafc", "#dcdcaa", "#20b8a0"];
 
 interface CaptionStylePanelProps {
   style: CaptionStyle;
@@ -45,6 +47,7 @@ export default function CaptionStylePanel({
                   style={{
                     color: look.textColor,
                     background: look.backgroundColor,
+                    fontFamily: cssFontStack(look.fontFamily),
                     textTransform: look.uppercase ? "uppercase" : "none",
                   }}
                 >
@@ -70,12 +73,11 @@ export default function CaptionStylePanel({
                 })
               }
             >
-              <option>Segoe UI</option>
-              <option>Arial</option>
-              <option>Helvetica</option>
-              <option>Verdana</option>
-              <option>Georgia</option>
-              <option>Trebuchet MS</option>
+              {CAPTION_FONTS.map((font) => (
+                <option key={font.family} value={font.family}>
+                  {font.family}
+                </option>
+              ))}
             </select>
           </label>
           <label className="style-field wide">

@@ -5,8 +5,10 @@ import {
   getSafeZoneProfile,
   type SafeZoneFormat,
 } from "@/lib/safezone";
+import { getFormatProfile } from "@/lib/video-format";
 import {
   DEFAULT_CAPTION_STYLE,
+  cssFontStack,
   readableTextOn,
   type CaptionStyle,
 } from "@/lib/caption-style";
@@ -26,6 +28,7 @@ export default function SafeZoneOverlay({
   activeWord?: number | null;
 }) {
   const safeZone = getSafeZoneProfile(format);
+  const profile = getFormatProfile(format);
   const top = safeZone.topMargin * 100;
   const left = safeZone.leftMargin * 100;
   const right = safeZone.rightMargin * 100;
@@ -63,11 +66,17 @@ export default function SafeZoneOverlay({
               background: captionStyle.backgroundEnabled
                 ? captionStyle.backgroundColor
                 : "transparent",
-              fontFamily: captionStyle.fontFamily,
+              fontFamily: cssFontStack(captionStyle.fontFamily),
               fontWeight: captionStyle.fontWeight,
-              fontSize: `clamp(11px, ${captionStyle.fontSize / 38}vw, ${
-                captionStyle.fontSize / 3
-              }px)`,
+              // The caption container spans the safe zone, so scale the font
+              // from the frame width the renderer uses.
+              fontSize: `max(6px, ${
+                ((captionStyle.fontSize / profile.referenceWidth) * 100) /
+                (1 - safeZone.leftMargin - safeZone.rightMargin)
+              }cqw)`,
+              ...(profile.boxMode === "hug"
+                ? { padding: "0.22em 0.45em" }
+                : {}),
               textAlign: captionStyle.alignment,
               WebkitTextStroke:
                 captionStyle.outlineWidth > 0

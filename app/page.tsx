@@ -51,16 +51,19 @@ function inspectVideo(file: File): Promise<VideoMetadata> {
   });
 }
 
-function UploadIcon({ kind }: { kind: "video" | "caption" }) {
-  return kind === "video" ? (
+// Captions always come from the audio. A failed request is not fatal: the
+// editor retries it automatically and offers a manual retry.
+async function requestTranscription(jobId: string): Promise<void> {
+  await fetch(`/api/transcribe/${jobId}`, { method: "POST" }).catch(
+    () => undefined,
+  );
+}
+
+function VideoIcon() {
+  return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <rect x="3" y="5" width="14" height="14" rx="2" />
       <path d="m17 10 4-2v8l-4-2M8 9.5l4.5 2.5L8 14.5z" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3" y="5" width="18" height="14" rx="2" />
-      <path d="M7 10h4m2 0h4M7 14h3m2 0h5" />
     </svg>
   );
 }
@@ -71,7 +74,6 @@ export default function UploadPage() {
   const inspectionIdRef = useRef(0);
   const [video, setVideo] = useState<File | null>(null);
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
-  const [srt, setSrt] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [inspecting, setInspecting] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -107,34 +109,27 @@ export default function UploadPage() {
     const selectedFiles = Array.from(files);
     if (selectedFiles.length === 0) return;
 
-    const videos = selectedFiles.filter(isVideoFile);
-    const captions = selectedFiles.filter((file) =>
-      file.name.toLowerCase().endsWith(".srt"),
-    );
-    const recognized = new Set([...videos, ...captions]);
-    const unsupported = selectedFiles.filter((file) => !recognized.has(file));
-
+    const unsupported = selectedFiles.filter((file) => !isVideoFile(file));
     if (unsupported.length > 0) {
       setError(
-        `File not recognized: ${unsupported.map((file) => file.name).join(", ")}. Select one video and one .srt file.`,
+        `File not recognized: ${unsupported.map((file) => file.name).join(", ")}. Select a video file (MP4, MOV, or WebM).`,
       );
       return;
     }
-    if (videos.length > 1 || captions.length > 1) {
-      setError("Select only one video and one .srt caption file.");
+    if (selectedFiles.length > 1) {
+      setError("Select only one video.");
       return;
     }
 
     setError(null);
-    if (captions[0]) setSrt(captions[0]);
-    if (videos[0]) await selectVideo(videos[0]);
+    await selectVideo(selectedFiles[0]);
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    if (!video || !srt || !metadata) {
-      setError("Add the video and caption files to continue.");
+    if (!video || !metadata) {
+      setError("Add a video to continue.");
       return;
     }
     setBusy(true);
@@ -157,7 +152,6 @@ export default function UploadPage() {
               height: metadata.height,
               durationMs: metadata.durationMs,
             },
-            srtText: await srt.text(),
           }),
         });
         const created = await readJsonResponse<{
@@ -172,15 +166,16 @@ export default function UploadPage() {
         if (!uploadResponse.ok) {
           throw new Error(`Video upload failed (${uploadResponse.status}).`);
         }
+        await requestTranscription(created.jobId);
         router.push(`/editor/${created.jobId}`);
         return;
       }
 
       const form = new FormData();
       form.append("video", video);
-      form.append("srt", srt);
       const response = await fetch("/api/upload", { method: "POST", body: form });
       const data = await readJsonResponse<{ jobId: string }>(response);
+      await requestTranscription(data.jobId);
       router.push(`/editor/${data.jobId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "An unexpected error occurred.");
@@ -188,7 +183,7 @@ export default function UploadPage() {
     }
   }
 
-  const ready = Boolean(video && srt && metadata && !busy && !inspecting);
+  const ready = Boolean(video && metadata && !busy && !inspecting);
 
   return (
     <main className="upload-page">
@@ -211,8 +206,9 @@ export default function UploadPage() {
           </div>
           <h1>Captions in the right place, on every screen.</h1>
           <p>
-            From vertical video to full-length episodes: we detect the format
-            and prepare a tailored review workspace.
+            From vertical video to full-length episodes: we detect the format,
+            write the captions from the audio, and prepare a tailored review
+            workspace.
           </p>
           <div className="format-showcase" aria-hidden="true">
             <div className="showcase-landscape">
@@ -233,6 +229,7 @@ export default function UploadPage() {
           </div>
           <div className="benefit-list">
             <span>✓ Automatic aspect ratio detection</span>
+            <span>✓ Captions generated from the audio</span>
             <span>✓ Format-specific safe zones</span>
             <span>✓ Video-synced review</span>
           </div>
@@ -246,14 +243,14 @@ export default function UploadPage() {
                 <h2>Create your review workspace</h2>
               </div>
               <span className="step-progress">
-                {Number(Boolean(video)) + Number(Boolean(srt))}/2 files
+                {video ? "1/1" : "0/1"} video
               </span>
             </div>
 
             <button
               type="button"
               className={`dropzone combined-dropzone ${
-                video || srt ? "has-file" : ""
+                video ? "has-file" : ""
               } ${
                 dragging ? "is-dragging" : ""
               }`}
@@ -277,8 +274,7 @@ export default function UploadPage() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="video/mp4,video/quicktime,video/webm,video/*,.srt,application/x-subrip"
-                multiple
+                accept="video/mp4,video/quicktime,video/webm,video/*"
                 onChange={(e) => {
                   if (e.target.files) void selectFiles(e.target.files);
                   e.target.value = "";
@@ -293,14 +289,16 @@ export default function UploadPage() {
                   </svg>
                 </span>
                 <div>
-                  <strong>Drag the video and captions here</strong>
-                  <span>or click to select both files at once</span>
+                  <strong>Drag the video here</strong>
+                  <span>
+                    or click to select it. Captions are written from the audio.
+                  </span>
                 </div>
               </div>
 
               <div className="detected-files">
                 <div className={`detected-file ${video && metadata ? "is-ready" : ""}`}>
-                  <span className="detected-file-icon"><UploadIcon kind="video" /></span>
+                  <span className="detected-file-icon"><VideoIcon /></span>
                   <span className="detected-file-copy">
                     <strong className="file-name">
                       {inspecting ? "Analyzing video…" : video?.name ?? "Video"}
@@ -317,19 +315,6 @@ export default function UploadPage() {
                     {video && metadata ? "✓ Detected" : "Required"}
                   </span>
                 </div>
-
-                <div className={`detected-file ${srt ? "is-ready" : ""}`}>
-                  <span className="detected-file-icon"><UploadIcon kind="caption" /></span>
-                  <span className="detected-file-copy">
-                    <strong className="file-name">{srt?.name ?? "Captions"}</strong>
-                    <small>
-                      {srt ? `${formatBytes(srt.size)} · SRT file` : "SRT · up to 2 MB"}
-                    </small>
-                  </span>
-                  <span className="detected-file-status">
-                    {srt ? "✓ Detected" : "Required"}
-                  </span>
-                </div>
               </div>
             </button>
 
@@ -342,6 +327,7 @@ export default function UploadPage() {
                   </strong>
                   <span>
                     Editor optimized for {metadata.width}:{metadata.height} and its safe zone.
+                    {" "}Captions will be transcribed from the audio.
                   </span>
                 </div>
               </div>
@@ -353,7 +339,7 @@ export default function UploadPage() {
               <button type="submit" className="primary-button" disabled={!ready}>
                 {busy ? (
                   <>
-                    <span className="spinner" /> Uploading files…
+                    <span className="spinner" /> Uploading video…
                   </>
                 ) : (
                   <>Open review workspace <span aria-hidden="true">→</span></>
@@ -361,7 +347,7 @@ export default function UploadPage() {
               </button>
               <p>
                 <span aria-hidden="true">⌁</span>
-                Your files remain protected during processing.
+                Your video remains protected during processing.
               </p>
             </div>
           </div>

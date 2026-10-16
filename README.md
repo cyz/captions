@@ -6,34 +6,38 @@
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-required-007808?style=flat-square&logo=ffmpeg&logoColor=white)](https://ffmpeg.org/)
 ![Node.js](https://img.shields.io/badge/Node.js-20%2B-5FA04E?style=flat-square&logo=node.js&logoColor=white)
 
-A focused web app for editing SRT subtitles and burning them directly into vertical MP4 videos, with a live safe-zone preview designed for **Instagram Reels**, **TikTok**, and **YouTube Shorts**.
+A focused web app for generating, editing, and burning captions directly into MP4 videos. Vertical videos get a live safe-zone preview designed for **Instagram Reels**, **TikTok**, and **YouTube Shorts**; horizontal long-form videos get their own caption layout. Captions are written from the audio with [Whisper](https://huggingface.co/openai/whisper-small), so you only upload the video.
 
 ![Caption Burner upload screen](docs/assets/caption-burner-home.png)
 
 ## Features
 
-- **Video and SRT Upload** - Import MP4 or MOV videos together with an SRT subtitle file
+- **Automatic Captions** - Generate timed, word-synced captions from the audio with Whisper (`whisper-small`). The spoken language is detected automatically, so you only upload the video
+- **Video Upload** - Import an MP4, MOV, or WebM video. Existing captions can still be exported as an SRT file from the editor
+- **Find and Replace** - Fix names and terms across every caption at once, with match case and whole-word options. Word-by-word timing is kept, and the change can be undone
+- **Clean Up Pauses and Fillers** - Shorten long pauses (found in the audio) and remove hesitations ("hum", "uh", "ahn"), optional filler words, or your own list. The preview skips the cuts, and captions shift to the shorter video
+- **Export Options** - Burned-in captions, or **soft subtitles**: a selectable subtitle track inside the MP4 that does not re-encode the video unless you made cuts. Captions can also be downloaded as SRT or VTT
 - **Live Preview** - See each caption over the video at its exact timestamp
 - **Segment Editor** - Update subtitle text, start time, and end time independently
 - **Smart Line Breaks** - Balance caption text across two lines at the nearest word boundary
 - **Time Splitting** - Divide long captions into two consecutive timed segments
 - **Merge and Group** - Join a caption with the next one, or group word-by-word captions into readable phrases
 - **Safe-Zone Validation** - Detect empty text, overlapping timestamps, invalid durations, and overflow
-- **Adaptive Layout** - Detect social and long-form videos and adjust the editing workspace
-- **Caption Styling** - Customize system font, size, alignment, text, and background colors
+- **Automatic Format Detection** - Classify every video by aspect ratio (and rotation) as social or long-form. Each format has its own font scale, line length, caption box, vertical position, and safe zone
+- **Caption Styling and Brand Presets** - Bundled fonts (Inter, Montserrat, Cascadia Code, JetBrains Mono) plus system fonts, and seven presets in one list, including VS Code Blue, Dark+ Editor (Cascadia Code), and Insiders Green. The VS Code colors, taken from code.visualstudio.com and the official logos, live in `lib/vscode-brand.ts`
 - **Burned-In Captions** - Render styled subtitles into an H.264 MP4 with FFmpeg
 - **Render Progress** - Follow processing status and download the completed video
 - **Automatic Cleanup** - Delete source files after rendering and output files after download
 
 ## Usage
 
-1. Select a vertical MP4 or MOV video.
-2. Select the corresponding SRT subtitle file.
-3. Choose **Upload and edit captions**.
-4. Select a segment to preview and edit its text or timing.
-5. Use **Break line** or **Split in time** when a caption needs adjustment.
-6. Resolve any highlighted validation errors.
-7. Choose **Finish and render**, then download the completed MP4.
+1. Select an MP4, MOV, or WebM video, vertical or horizontal.
+2. Choose **Open review workspace**. A transcription progress bar appears in the editor until the captions written from the audio are ready.
+3. Select a segment to preview and edit its text or timing.
+4. Use **Break line** or **Split in time** when a caption needs adjustment.
+5. Resolve any highlighted validation errors.
+6. Optionally open **Clean up** to remove pauses and fillers, and use **Find and replace** in the Captions panel to fix terms.
+7. Pick **Burned-in captions** or **Soft subtitles**, choose **Export**, then download the completed MP4.
 
 ## Caption Rules
 
@@ -41,17 +45,21 @@ A focused web app for editing SRT subtitles and burning them directly into verti
 |---|---|
 | Video size | 600 MB maximum |
 | Video duration | 10 minutes maximum |
-| Recommended aspect ratio | 9:16 vertical |
 | Caption lines | 2 per segment |
-| Recommended line length | 34 characters |
 
-Captions are rendered in white over a black background near the bottom of the frame. The layout reserves space for platform interface elements at the top, bottom, and right side of the video.
+| Format | Detected when | Reference width | Line length | Caption box |
+|---|---|---|---|---|
+| Social | width / height < 1.2 (9:16, 4:5, 1:1) | 1080 px | 34 characters | Fills the safe zone |
+| Long-form | width / height ≥ 1.2 (16:9, 4:3) | 1920 px | 42 characters | Wraps around the text |
+
+Font sizes are authored against the reference width and scale with the video, so a 1080p horizontal video and a 1080×1920 vertical video look equally proportioned. Captions are rendered in white over a dark box near the bottom of the frame. The social layout reserves space for platform interface elements at the top, bottom, and right side of the video; the long-form layout keeps captions inside title-safe margins.
 
 ## Requirements
 
 - Node.js 20.9 or later
 - npm
 - FFmpeg and ffprobe available on your `PATH`
+- About 300 MB of disk for the Whisper model, downloaded on the first transcription into `.cache/whisper` (override with `WHISPER_CACHE_DIR`)
 
 On macOS, install FFmpeg with Homebrew:
 
@@ -98,13 +106,13 @@ npm start
 The application uses the Next.js App Router and Node.js route handlers. Local development stores files and metadata under `data/jobs/<jobId>`, which is intentionally excluded from Git.
 
 ```text
-Video + SRT upload
+Video upload
 	|
 	v
-ffprobe metadata inspection
+ffprobe inspection -> format detection (social / long-form)
 	|
 	v
-SRT parsing and validation
+FFmpeg audio -> Whisper (language + word timestamps) -> captions
 	|
 	v
 Caption editing and safe-zone preview
@@ -117,10 +125,11 @@ Key directories:
 
 ```text
 app/          Pages and API route handlers
+public/fonts/ Bundled caption fonts (SIL Open Font License, see the LICENSE files there)
 components/   Reusable interface components
-lib/          SRT, safe-zone, storage, queue, canvas, and FFmpeg logic
+lib/          SRT/VTT, format profiles, safe-zone, Whisper transcription, silence and filler cleanup, cuts, storage, queue, canvas, and FFmpeg logic
 data/         Local runtime files (not committed)
-worker/       Single-execution Azure render worker
+worker/       Single-execution Azure render and transcription worker
 infra/        Azure Bicep template and deployment script
 ```
 
@@ -141,8 +150,15 @@ Browser -> scale-to-zero Container App -> Table Storage
 - Videos upload directly from the browser to private Blob Storage using a short-lived SAS.
 - Job metadata and caption segments are stored in Table Storage.
 - Queue Storage triggers one FFmpeg Container Apps Job execution at a time.
+- A second queue and Container Apps Job (`WORKER_QUEUE=transcribe`) runs Whisper
+  speech-to-text, so renders stay cheap.
 - The web app uses `0.25` vCPU and `0.5 GiB`, with zero minimum replicas.
 - The render job uses `1` vCPU and `2 GiB` only while processing.
+- The transcription job uses `2` vCPU and `4 GiB` only while processing. Measure
+  transcription time on your own videos before changing these values.
+- The Whisper model is baked into the container image (`WHISPER_OFFLINE=1`), so
+  jobs never download it at run time. Set `WHISPER_MODEL` or `WHISPER_DTYPE` at
+  build time to use a different ONNX Whisper model or precision.
 - Managed identities grant the web app and worker access to Storage.
 - The app deletes input blobs after a successful render and deletes the output
   after its first completed download.
@@ -153,12 +169,13 @@ Browser -> scale-to-zero Container App -> Table Storage
 
 | Route | Purpose |
 |---|---|
-| `POST /api/upload` | Store the source files and create a processing job |
-| `GET /api/segments/:jobId` | Load video metadata and subtitle segments |
-| `PUT /api/segments/:jobId` | Save edited subtitle segments |
+| `POST /api/upload` | Store the video and create a processing job (an `srt` field is still accepted by the API) |
+| `POST /api/transcribe/:jobId` | Queue Whisper transcription (`{"replace": true}` overwrites existing captions) |
+| `GET /api/segments/:jobId` | Load video metadata, subtitle segments, and transcription state |
+| `PUT /api/segments/:jobId` | Save edited subtitle segments, style, and cuts |
 | `GET /api/preview/:jobId` | Stream the source video to the editor |
-| `POST /api/render/:jobId` | Queue the caption rendering job |
-| `GET /api/status/:jobId` | Report rendering status and progress |
+| `POST /api/render/:jobId` | Queue the export (`{"mode": "burned" \| "soft"}`) |
+| `GET /api/status/:jobId` | Report rendering and transcription status and progress |
 | `GET /api/download/:jobId` | Download the rendered MP4 |
 
 ## Deployment Notes
@@ -201,3 +218,4 @@ Netlify can deploy the interface and Next.js route handlers, but the current vid
 - `npm start` runs the production server
 - `npm run worker` processes one Azure Queue message and exits
 - `npm run check` runs the TypeScript compiler without emitting files
+- `npm test` runs the unit tests (format detection, line wrapping, segmentation, find and replace, cuts, cleanup)

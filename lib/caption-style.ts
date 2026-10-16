@@ -1,3 +1,6 @@
+import type { VideoFormat } from "./video-format";
+import { VSCODE_INSIDERS as INSIDERS, VSCODE_STABLE as STABLE } from "./vscode-brand";
+
 export type CaptionPreset = "box";
 export type CaptionFont =
   | "Arial"
@@ -5,7 +8,42 @@ export type CaptionFont =
   | "Verdana"
   | "Georgia"
   | "Trebuchet MS"
-  | "Segoe UI";
+  | "Segoe UI"
+  | "Inter"
+  | "Montserrat"
+  | "JetBrains Mono"
+  | "Cascadia Code";
+export interface CaptionFontOption {
+  family: CaptionFont;
+  // Bundled fonts ship with the app, so the preview and the render match on
+  // every machine. The rest depend on the fonts installed on the host.
+  bundled: boolean;
+  monospace?: boolean;
+}
+
+export const CAPTION_FONTS: CaptionFontOption[] = [
+  { family: "Inter", bundled: true },
+  { family: "Montserrat", bundled: true },
+  { family: "Cascadia Code", bundled: true, monospace: true },
+  { family: "JetBrains Mono", bundled: true, monospace: true },
+  { family: "Segoe UI", bundled: false },
+  { family: "Arial", bundled: false },
+  { family: "Helvetica", bundled: false },
+  { family: "Verdana", bundled: false },
+  { family: "Georgia", bundled: false },
+  { family: "Trebuchet MS", bundled: false },
+];
+
+export function isCaptionFont(value: unknown): value is CaptionFont {
+  return CAPTION_FONTS.some((font) => font.family === value);
+}
+
+// CSS font stack for the browser preview.
+export function cssFontStack(family: CaptionFont): string {
+  const monospace = CAPTION_FONTS.find((font) => font.family === family)?.monospace;
+  return `"${family}", ${monospace ? "ui-monospace, Menlo, monospace" : "system-ui, sans-serif"}`;
+}
+
 export type CaptionAlignment = "left" | "center" | "right";
 export type HighlightMode = "text" | "pill";
 
@@ -52,7 +90,23 @@ export const CAPTION_PRESETS: Record<CaptionPreset, CaptionStyle> = {
 
 export const DEFAULT_CAPTION_STYLE = CAPTION_PRESETS.box;
 
-// Quick looks built only from fields the renderer already supports.
+// Font size is authored against the format's reference width (1080 social,
+// 1920 long-form), and horizontal video keeps captions lower in the frame.
+const LONG_FORM_CAPTION_STYLE: CaptionStyle = {
+  ...CAPTION_PRESETS.box,
+  fontSize: 52,
+  verticalPosition: 86,
+};
+
+export function getDefaultCaptionStyle(
+  format: VideoFormat = "social",
+): CaptionStyle {
+  return { ...(format === "long-form" ? LONG_FORM_CAPTION_STYLE : DEFAULT_CAPTION_STYLE) };
+}
+
+// Quick looks built only from fields the renderer already supports. Each one
+// must look clearly different from the others (a test enforces it). The VS Code
+// and Insiders colors live in ./vscode-brand.
 export const QUICK_STYLES: Array<{
   id: string;
   label: string;
@@ -66,7 +120,12 @@ export const QUICK_STYLES: Array<{
   {
     id: "light",
     label: "Light",
-    patch: { textColor: "#111318", backgroundColor: "#ffffff", uppercase: false },
+    patch: {
+      textColor: "#111318",
+      backgroundColor: "#ffffff",
+      highlightColor: STABLE.lightLink,
+      uppercase: false,
+    },
   },
   {
     id: "highlight",
@@ -74,14 +133,42 @@ export const QUICK_STYLES: Array<{
     patch: { textColor: "#f8d849", backgroundColor: "#111318", uppercase: true },
   },
   {
-    id: "vscode",
-    label: "VS Code",
-    patch: { textColor: "#ffffff", backgroundColor: "#007acc", uppercase: false },
-  },
-  {
     id: "pink",
     label: "Bold pink",
     patch: { textColor: "#ffffff", backgroundColor: "#f65282", uppercase: false },
+  },
+  {
+    id: "vscode-blue",
+    label: "VS Code Blue",
+    patch: {
+      fontFamily: "Inter",
+      textColor: "#ffffff",
+      backgroundColor: STABLE.accent,
+      highlightColor: STABLE.yellow,
+      uppercase: false,
+    },
+  },
+  {
+    id: "vscode-dark-plus",
+    label: "Dark+ Editor",
+    patch: {
+      fontFamily: "Cascadia Code",
+      textColor: STABLE.editorText,
+      backgroundColor: STABLE.editorSurface,
+      highlightColor: STABLE.editorFunction,
+      uppercase: false,
+    },
+  },
+  {
+    id: "insiders-green",
+    label: "Insiders Green",
+    patch: {
+      fontFamily: "Inter",
+      textColor: "#ffffff",
+      backgroundColor: INSIDERS.green,
+      highlightColor: INSIDERS.yellow,
+      uppercase: false,
+    },
   },
 ];
 
@@ -98,11 +185,14 @@ export function readableTextOn(hex: string): string {
   return luminance > 0.6 ? "#111318" : "#ffffff";
 }
 
-export function normalizeCaptionStyle(value: unknown): CaptionStyle {
-  if (!value || typeof value !== "object") return { ...DEFAULT_CAPTION_STYLE };
+export function normalizeCaptionStyle(
+  value: unknown,
+  format: VideoFormat = "social",
+): CaptionStyle {
+  const base = getDefaultCaptionStyle(format);
+  if (!value || typeof value !== "object") return base;
   const input = value as Partial<CaptionStyle>;
   const preset: CaptionPreset = "box";
-  const base = CAPTION_PRESETS[preset];
   const color = (candidate: unknown, fallback: string) =>
     typeof candidate === "string" && HEX_COLOR.test(candidate)
       ? candidate
@@ -116,15 +206,9 @@ export function normalizeCaptionStyle(value: unknown): CaptionStyle {
 
   return {
     preset,
-    fontFamily:
-      input.fontFamily === "Arial" ||
-      input.fontFamily === "Helvetica" ||
-      input.fontFamily === "Verdana" ||
-      input.fontFamily === "Georgia" ||
-      input.fontFamily === "Trebuchet MS" ||
-      input.fontFamily === "Segoe UI"
-        ? input.fontFamily
-        : base.fontFamily,
+    fontFamily: isCaptionFont(input.fontFamily)
+      ? input.fontFamily
+      : base.fontFamily,
     fontWeight: 800,
     fontSize: Math.round(number(input.fontSize, 28, 96, base.fontSize)),
     textColor: color(input.textColor, base.textColor),

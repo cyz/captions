@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readMeta, updateMeta } from "@/lib/store";
+import { isTranscribing, readMeta, updateMeta } from "@/lib/store";
 import { Segment, validateSegments } from "@/lib/srt";
 import { normalizeCaptionStyle } from "@/lib/caption-style";
 import { getArtifactSize } from "@/lib/artifacts";
+import { normalizeCuts } from "@/lib/cuts";
 
 export const runtime = "nodejs";
 
@@ -23,7 +24,10 @@ export async function GET(
   return NextResponse.json({
     segments: meta.segments,
     video: meta.video,
-    captionStyle: normalizeCaptionStyle(meta.captionStyle),
+    captionStyle: normalizeCaptionStyle(meta.captionStyle, meta.video?.format),
+    transcription: meta.transcription ?? null,
+    silences: meta.silences ?? [],
+    cuts: meta.cuts ?? [],
     render: { status: meta.status, progress: meta.progress, outputReady },
   });
 }
@@ -35,6 +39,13 @@ export async function PUT(
   const { jobId } = await params;
   const meta = await readMeta(jobId);
   if (!meta) return NextResponse.json({ error: "Job not found." }, { status: 404 });
+  // The transcription worker writes the captions when it finishes.
+  if (isTranscribing(meta)) {
+    return NextResponse.json(
+      { error: "Captions are still being generated." },
+      { status: 409 },
+    );
+  }
 
   const body = await req.json();
   const incoming = body.segments;
@@ -56,9 +67,15 @@ export async function PUT(
       : {}),
   }));
 
-  const issues = validateSegments(segments);
-  const captionStyle = normalizeCaptionStyle(body.captionStyle ?? meta.captionStyle);
-  await updateMeta(jobId, { segments, captionStyle });
+  const issues = validateSegments(segments, meta.video?.format);
+  const captionStyle = normalizeCaptionStyle(
+    body.captionStyle ?? meta.captionStyle,
+    meta.video?.format,
+  );
+  const cuts = Array.isArray(body.cuts)
+    ? normalizeCuts(body.cuts, meta.video?.durationMs || Infinity)
+    : (meta.cuts ?? []);
+  await updateMeta(jobId, { segments, captionStyle, cuts });
 
-  return NextResponse.json({ segments, issues, captionStyle });
+  return NextResponse.json({ segments, issues, captionStyle, cuts });
 }

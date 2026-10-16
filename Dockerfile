@@ -21,8 +21,14 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/.next/static ./.next/standalone/.next/static
+COPY --from=build /app/public ./public
+COPY --from=build /app/public ./.next/standalone/public
 COPY --from=build /app/lib ./lib
 COPY --from=build /app/worker ./worker
+# Bake the Whisper model into the image so transcription never downloads it.
+ENV WHISPER_CACHE_DIR=/app/.cache/whisper
+RUN node worker/download-model.mjs
+ENV WHISPER_OFFLINE=1
 COPY --from=build /app/next.config.js ./next.config.js
 EXPOSE 3000
 CMD ["node", ".next/standalone/server.js"]

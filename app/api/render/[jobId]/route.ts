@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readMeta, updateMeta } from "@/lib/store";
+import { isTranscribing, readMeta, updateMeta } from "@/lib/store";
 import { validateSegments } from "@/lib/srt";
 import { cancelQueued, enqueueRender } from "@/lib/queue";
 import { getArtifactSize } from "@/lib/artifacts";
@@ -7,7 +7,7 @@ import { getArtifactSize } from "@/lib/artifacts";
 export const runtime = "nodejs";
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ jobId: string }> },
 ) {
   const { jobId } = await params;
@@ -31,7 +31,20 @@ export async function POST(
     );
   }
 
-  const issues = validateSegments(meta.segments);
+  if (isTranscribing(meta)) {
+    return NextResponse.json(
+      { error: "Captions are still being generated." },
+      { status: 409 },
+    );
+  }
+  if (meta.segments.length === 0) {
+    return NextResponse.json(
+      { error: "Add or generate captions before exporting." },
+      { status: 400 },
+    );
+  }
+
+  const issues = validateSegments(meta.segments, meta.video?.format);
   if (issues.length > 0) {
     return NextResponse.json(
       { error: "There are invalid segments.", issues },
@@ -39,7 +52,15 @@ export async function POST(
     );
   }
 
-  await updateMeta(jobId, { status: "queued", progress: 0, error: undefined });
+  const body = (await req.json().catch(() => ({}))) as { mode?: string };
+  const exportMode = body.mode === "soft" ? "soft" : "burned";
+
+  await updateMeta(jobId, {
+    status: "queued",
+    progress: 0,
+    error: undefined,
+    exportMode,
+  });
   await enqueueRender(jobId);
 
   return NextResponse.json({ status: "queued" });

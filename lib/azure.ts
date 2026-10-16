@@ -9,11 +9,16 @@ import { QueueClient } from "@azure/storage-queue";
 const DEFAULT_CONTAINER = "caption-jobs";
 const DEFAULT_TABLE = "CaptionJobs";
 const DEFAULT_QUEUE = "caption-renders";
+const DEFAULT_TRANSCRIBE_QUEUE = "caption-transcriptions";
+
+// Rendering and speech-to-text run on separate queues so each worker job can be
+// sized for its own workload.
+export type QueueKind = "render" | "transcribe";
 
 let credential: DefaultAzureCredential | undefined;
 let blobServiceClient: BlobServiceClient | undefined;
 let tableClient: TableClient | undefined;
-let queueClient: QueueClient | undefined;
+const queueClients = new Map<QueueKind, QueueClient>();
 
 export function isAzureStorageEnabled(): boolean {
   return process.env.CAPTION_STORAGE === "azure";
@@ -57,15 +62,20 @@ export function getTableClient(): TableClient {
   return tableClient;
 }
 
-export function getQueueClient(): QueueClient {
-  const accountName = getStorageAccountName();
-  queueClient ??= new QueueClient(
-    `https://${accountName}.queue.core.windows.net/${
-      process.env.AZURE_STORAGE_QUEUE || DEFAULT_QUEUE
-    }`,
-    getCredential(),
-  );
-  return queueClient;
+export function getQueueClient(kind: QueueKind = "render"): QueueClient {
+  let client = queueClients.get(kind);
+  if (!client) {
+    const queueName =
+      kind === "transcribe"
+        ? process.env.AZURE_STORAGE_TRANSCRIBE_QUEUE || DEFAULT_TRANSCRIBE_QUEUE
+        : process.env.AZURE_STORAGE_QUEUE || DEFAULT_QUEUE;
+    client = new QueueClient(
+      `https://${getStorageAccountName()}.queue.core.windows.net/${queueName}`,
+      getCredential(),
+    );
+    queueClients.set(kind, client);
+  }
+  return client;
 }
 
 export function assertJobId(jobId: string): void {

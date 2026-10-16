@@ -3,6 +3,8 @@
 // they scale to any 9:16 resolution. Based on best practices for Reels/Shorts/TikTok:
 // keep captions clear of the top, the bottom UI/CTA band, and the right icon column.
 
+import { FORMAT_PROFILES } from "./video-format";
+
 export const TARGET_WIDTH = 1080;
 export const TARGET_HEIGHT = 1920;
 export const TARGET_ASPECT = 9 / 16;
@@ -42,10 +44,11 @@ export function getSafeZoneProfile(format: SafeZoneFormat): SafeZoneProfile {
 }
 
 // Maximum text lines allowed per subtitle segment (hard product rule).
-export const MAX_LINES = 2;
+export const MAX_LINES = FORMAT_PROFILES.social.maxLines;
 
-// Recommended max characters per line before wrapping/warning.
-export const MAX_CHARS_PER_LINE = 34;
+// Recommended max characters per line before wrapping/warning (social format;
+// long-form limits live in FORMAT_PROFILES).
+export const MAX_CHARS_PER_LINE = FORMAT_PROFILES.social.maxCharsPerLine;
 
 export interface SafeZoneRect {
   // Pixel rectangle (in target space) that is safe for caption text.

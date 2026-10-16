@@ -1,12 +1,15 @@
-import { getQueueClient, isAzureStorageEnabled } from "../lib/azure";
-import { processJob } from "../lib/queue";
+import { getQueueClient, isAzureStorageEnabled, type QueueKind } from "../lib/azure";
+import { processJob, processTranscription } from "../lib/queue";
 
 async function main(): Promise<void> {
   if (!isAzureStorageEnabled()) {
     throw new Error("The render worker requires CAPTION_STORAGE=azure.");
   }
 
-  const queue = getQueueClient();
+  // Each worker job drains one queue: renders (default) or transcriptions.
+  const kind: QueueKind =
+    process.env.WORKER_QUEUE === "transcribe" ? "transcribe" : "render";
+  const queue = getQueueClient(kind);
   const response = await queue.receiveMessages({
     numberOfMessages: 1,
     visibilityTimeout: 3600,
@@ -24,7 +27,8 @@ async function main(): Promise<void> {
     throw error;
   }
 
-  await processJob(jobId);
+  if (kind === "transcribe") await processTranscription(jobId);
+  else await processJob(jobId);
   await queue.deleteMessage(message.messageId, message.popReceipt);
 }
 

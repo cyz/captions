@@ -1,4 +1,4 @@
-import { MAX_CHARS_PER_LINE, MAX_LINES } from "./safezone";
+import { getFormatProfile, type VideoFormat } from "./video-format";
 
 export interface Segment {
   index: number;
@@ -83,10 +83,26 @@ export function serializeSrt(segments: Segment[]): string {
     .join("\n");
 }
 
-// Wrap text into at most MAX_LINES lines. Manual line breaks (\n) entered by the
+// WebVTT export: dotted milliseconds and escaped markup characters.
+export function serializeVtt(segments: Segment[]): string {
+  const stamp = (ms: number) => msToTimestamp(ms).replace(",", ".");
+  const escape = (text: string) =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const cues = segments.map(
+    (seg) => `${stamp(seg.start)} --> ${stamp(seg.end)}\n${escape(seg.text)}\n`,
+  );
+  return `WEBVTT\n\n${cues.join("\n")}`;
+}
+
+// Wrap text into at most maxLines lines. Manual line breaks (\n) entered by the
 // user are honored so they control where the break happens; otherwise the text
-// is auto-wrapped by MAX_CHARS_PER_LINE. Returns lines and whether it overflows.
-export function wrapText(text: string): { lines: string[]; overflow: boolean } {
+// is auto-wrapped by the format's characters-per-line limit. Returns lines and
+// whether it overflows.
+export function wrapText(
+  text: string,
+  format: VideoFormat = "social",
+): { lines: string[]; overflow: boolean } {
+  const { maxCharsPerLine, maxLines } = getFormatProfile(format);
   const normalized = text.replace(/\r/g, "");
 
   // Honor explicit line breaks so the user can keep captions within the pattern.
@@ -96,13 +112,13 @@ export function wrapText(text: string): { lines: string[]; overflow: boolean } {
       .map((l) => l.replace(/\s+/g, " ").trim())
       .filter((l) => l !== "");
     const overflow =
-      manual.length > MAX_LINES ||
-      manual.some((l) => l.length > MAX_CHARS_PER_LINE);
-    return { lines: manual.slice(0, MAX_LINES), overflow };
+      manual.length > maxLines ||
+      manual.some((l) => l.length > maxCharsPerLine);
+    return { lines: manual.slice(0, maxLines), overflow };
   }
 
   const collapsed = normalized.replace(/\s+/g, " ").trim();
-  if (collapsed.length <= MAX_CHARS_PER_LINE) {
+  if (collapsed.length <= maxCharsPerLine) {
     return { lines: collapsed ? [collapsed] : [], overflow: false };
   }
 
@@ -112,7 +128,7 @@ export function wrapText(text: string): { lines: string[]; overflow: boolean } {
 
   for (const word of words) {
     const candidate = current ? `${current} ${word}` : word;
-    if (candidate.length > MAX_CHARS_PER_LINE && current) {
+    if (candidate.length > maxCharsPerLine && current) {
       lines.push(current);
       current = word;
     } else {
@@ -121,8 +137,8 @@ export function wrapText(text: string): { lines: string[]; overflow: boolean } {
   }
   if (current) lines.push(current);
 
-  const overflow = lines.length > MAX_LINES;
-  return { lines: lines.slice(0, MAX_LINES), overflow };
+  const overflow = lines.length > maxLines;
+  return { lines: lines.slice(0, maxLines), overflow };
 }
 
 export interface SegmentValidation {
@@ -225,7 +241,7 @@ export interface GroupOptions {
 export function groupShortSegments(
   segments: Segment[],
   {
-    maxChars = MAX_CHARS_PER_LINE,
+    maxChars = getFormatProfile("social").maxCharsPerLine,
     maxGapMs = 700,
     maxDurationMs = 5000,
   }: GroupOptions = {},
@@ -276,7 +292,11 @@ export function looksWordByWord(segments: Segment[]): boolean {
 }
 
 // Validate ordering, timing and the two-line rule across all segments.
-export function validateSegments(segments: Segment[]): SegmentValidation[] {
+export function validateSegments(
+  segments: Segment[],
+  format: VideoFormat = "social",
+): SegmentValidation[] {
+  const { maxLines } = getFormatProfile(format);
   const results: SegmentValidation[] = [];
 
   segments.forEach((seg, i) => {
@@ -288,9 +308,9 @@ export function validateSegments(segments: Segment[]): SegmentValidation[] {
     if (prev && seg.start < prev.end) {
       errors.push("Overlaps the previous segment.");
     }
-    const { overflow } = wrapText(seg.text);
+    const { overflow } = wrapText(seg.text, format);
     if (overflow) {
-      errors.push(`Text exceeds ${MAX_LINES} lines in the safe zone.`);
+      errors.push(`Text exceeds ${maxLines} lines in the safe zone.`);
     }
     if (seg.text.trim() === "") {
       errors.push("Empty text.");

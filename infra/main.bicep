@@ -15,9 +15,11 @@ var storageName = 'stcap${take(suffix, 13)}'
 var containerName = 'caption-jobs'
 var tableName = 'CaptionJobs'
 var queueName = 'caption-renders'
+var transcribeQueueName = 'caption-transcriptions'
 var environmentName = '${namePrefix}-env'
 var webName = '${namePrefix}-web'
 var jobName = '${namePrefix}-render'
+var transcribeJobName = '${namePrefix}-transcribe'
 var blobContributorRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
 var queueContributorRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
 var tableContributorRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
@@ -99,6 +101,12 @@ resource queueService 'Microsoft.Storage/storageAccounts/queueServices@2023-05-0
 resource renderQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-05-01' = {
   parent: queueService
   name: queueName
+  properties: {}
+}
+
+resource transcribeQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-05-01' = {
+  parent: queueService
+  name: transcribeQueueName
   properties: {}
 }
 
@@ -208,6 +216,7 @@ resource web 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_STORAGE_CONTAINER', value: containerName }
             { name: 'AZURE_STORAGE_TABLE', value: tableName }
             { name: 'AZURE_STORAGE_QUEUE', value: queueName }
+            { name: 'AZURE_STORAGE_TRANSCRIBE_QUEUE', value: transcribeQueueName }
             { name: 'DATA_ROOT', value: '/tmp/caption-data' }
           ]
           resources: {
@@ -315,6 +324,89 @@ resource renderJob 'Microsoft.App/jobs@2024-03-01' = {
   dependsOn: [imagePullRole]
 }
 
+// Speech-to-text runs in its own, larger job so renders stay cheap.
+resource transcribeJob 'Microsoft.App/jobs@2024-03-01' = {
+  name: transcribeJobName
+  location: location
+  identity: {
+    type: 'SystemAssigned,UserAssigned'
+    userAssignedIdentities: {
+      '${imagePullIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: environment.id
+    configuration: {
+      triggerType: 'Event'
+      replicaTimeout: 3600
+      replicaRetryLimit: 0
+      registries: [
+        {
+          server: registry.properties.loginServer
+          identity: imagePullIdentity.id
+        }
+      ]
+      secrets: [
+        {
+          name: 'queue-connection'
+          value: 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=core.windows.net'
+        }
+      ]
+      eventTriggerConfig: {
+        parallelism: 1
+        replicaCompletionCount: 1
+        scale: {
+          minExecutions: 0
+          maxExecutions: 1
+          pollingInterval: 30
+          rules: [
+            {
+              name: 'transcribe-queue'
+              type: 'azure-queue'
+              metadata: {
+                accountName: storage.name
+                queueName: transcribeQueueName
+                queueLength: '1'
+              }
+              auth: [
+                {
+                  secretRef: 'queue-connection'
+                  triggerParameter: 'connection'
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'worker'
+          image: containerImage
+          command: ['npm']
+          args: ['run', 'worker']
+          env: [
+            { name: 'CAPTION_STORAGE', value: 'azure' }
+            { name: 'AZURE_STORAGE_ACCOUNT_NAME', value: storage.name }
+            { name: 'AZURE_STORAGE_CONTAINER', value: containerName }
+            { name: 'AZURE_STORAGE_TABLE', value: tableName }
+            { name: 'AZURE_STORAGE_QUEUE', value: queueName }
+            { name: 'AZURE_STORAGE_TRANSCRIBE_QUEUE', value: transcribeQueueName }
+            { name: 'WORKER_QUEUE', value: 'transcribe' }
+            { name: 'DATA_ROOT', value: '/tmp/caption-data' }
+          ]
+          resources: {
+            cpu: 2
+            memory: '4Gi'
+          }
+        }
+      ]
+    }
+  }
+  dependsOn: [imagePullRole]
+}
+
 resource webBlobRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storage.id, web.id, blobContributorRole)
   scope: storage
@@ -375,6 +467,37 @@ resource jobTableRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
+resource transcribeBlobRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storage.id, transcribeJob.id, blobContributorRole)
+  scope: storage
+  properties: {
+    principalId: transcribeJob.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: blobContributorRole
+  }
+}
+
+resource transcribeQueueRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storage.id, transcribeJob.id, queueContributorRole)
+  scope: storage
+  properties: {
+    principalId: transcribeJob.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: queueContributorRole
+  }
+}
+
+resource transcribeTableRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storage.id, transcribeJob.id, tableContributorRole)
+  scope: storage
+  properties: {
+    principalId: transcribeJob.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: tableContributorRole
+  }
+}
+
 output webUrl string = 'https://${web.properties.configuration.ingress.fqdn}'
 output storageAccountName string = storage.name
 output renderJobName string = renderJob.name
+output transcribeJobName string = transcribeJob.name

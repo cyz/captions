@@ -16,6 +16,7 @@ export async function GET(
     status: meta.status,
     progress: meta.progress,
     error: meta.error ?? null,
+    transcription: meta.transcription ?? null,
     ahead: meta.status === "queued" ? await jobsAhead(jobId) : null,
   });
 }

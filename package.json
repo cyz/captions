@@ -10,13 +10,15 @@
     "build": "next build",
     "start": "next start",
     "worker": "tsx worker/render.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@azure/data-tables": "^13.3.2",
     "@azure/identity": "^4.13.3",
     "@azure/storage-blob": "^12.33.0",
     "@azure/storage-queue": "^12.31.0",
+    "@huggingface/transformers": "^4.3.1",
     "@napi-rs/canvas": "^1.0.9",
     "next": "^16.3.5",
     "react": "^19.3.0",

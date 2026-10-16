@@ -3,6 +3,8 @@
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CaptionStylePanel from "@/components/editor/CaptionStylePanel";
 import CaptionTimeline from "@/components/editor/CaptionTimeline";
+import CleanupPanel from "@/components/editor/CleanupPanel";
+import FindReplace, { type FindState } from "@/components/editor/FindReplace";
 import TimeField from "@/components/editor/TimeField";
 import SafeZoneOverlay from "@/components/SafeZoneOverlay";
 import { readJsonResponse } from "@/lib/api-response";
@@ -11,29 +13,36 @@ import {
   normalizeCaptionStyle,
   type CaptionStyle,
 } from "@/lib/caption-style";
-import { MAX_CHARS_PER_LINE, MAX_LINES } from "@/lib/safezone";
 import {
   Segment,
   groupShortSegments,
   looksWordByWord,
   mergeWithNext,
   serializeSrt,
+  serializeVtt,
   validateSegments,
   wordTimings,
   wrapText,
 } from "@/lib/srt";
 import { renderStageLabel, RENDER_PHASES } from "@/lib/render-progress";
-import type { VideoInfo } from "@/lib/store";
+import { normalizeCuts, remapSegments, totalCutMs, type Cut } from "@/lib/cuts";
+import { findMatches, replaceInSegments } from "@/lib/find-replace";
+import type { CleanupResult } from "@/lib/cleanup";
+import type { Silence } from "@/lib/silence";
+import type { ExportMode, Transcription, VideoInfo } from "@/lib/store";
+import { transcriptionStageLabel } from "@/lib/transcription-progress";
 import {
   classifyVideoFormat,
+  getFormatProfile,
   type VideoFormat,
 } from "@/lib/video-format";
 
-type EditorTool = "style" | "captions";
+type EditorTool = "style" | "captions" | "cleanup";
 
 interface Snapshot {
   segments: Segment[];
   captionStyle: CaptionStyle;
+  cuts: Cut[];
 }
 
 const HISTORY_LIMIT = 100;
@@ -76,6 +85,18 @@ export default function EditorPage({
   const videoRef = useRef<HTMLVideoElement>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [video, setVideo] = useState<VideoInfo | null>(null);
+  const [transcription, setTranscription] = useState<Transcription | null>(null);
+  const [silences, setSilences] = useState<Silence[]>([]);
+  const [cuts, setCuts] = useState<Cut[]>([]);
+  const [exportMode, setExportMode] = useState<ExportMode>("burned");
+  const [find, setFind] = useState<FindState>({
+    query: "",
+    replacement: "",
+    matchCase: false,
+    wholeWord: false,
+  });
+  const [lastReplaced, setLastReplaced] = useState<number | null>(null);
+  const autoTranscribeRef = useRef(false);
   const [captionStyle, setCaptionStyle] = useState<CaptionStyle>({
     ...DEFAULT_CAPTION_STYLE,
   });
@@ -101,6 +122,7 @@ export default function EditorPage({
   const [showShortcuts, setShowShortcuts] = useState(false);
   const latestRef = useRef<Snapshot>({
     segments: [],
+    cuts: [],
     captionStyle: { ...DEFAULT_CAPTION_STYLE },
   });
   const historyRef = useRef<{
@@ -111,8 +133,8 @@ export default function EditorPage({
   }>({ past: [], future: [], key: null, at: 0 });
 
   useEffect(() => {
-    latestRef.current = { segments, captionStyle };
-  }, [segments, captionStyle]);
+    latestRef.current = { segments, captionStyle, cuts };
+  }, [segments, captionStyle, cuts]);
 
   // Edits made in quick succession with the same key share one undo step.
   const pushHistory = useCallback((key?: string) => {
@@ -134,6 +156,7 @@ export default function EditorPage({
     latestRef.current = snapshot;
     setSegments(snapshot.segments);
     setCaptionStyle(snapshot.captionStyle);
+    setCuts(snapshot.cuts);
     setSelectedIndex((current) =>
       snapshot.segments.some((segment) => segment.index === current)
         ? current
@@ -178,11 +201,19 @@ export default function EditorPage({
           segments: Segment[];
           video?: VideoInfo;
           captionStyle?: CaptionStyle;
+          transcription?: Transcription | null;
+          silences?: Silence[];
+          cuts?: Cut[];
           render?: { status: string; progress?: number; outputReady?: boolean };
         }>(response);
         setSegments(data.segments);
+        setSilences(data.silences ?? []);
+        setCuts(data.cuts ?? []);
         setVideo(data.video ?? null);
-        setCaptionStyle(normalizeCaptionStyle(data.captionStyle));
+        setTranscription(data.transcription ?? null);
+        setCaptionStyle(
+          normalizeCaptionStyle(data.captionStyle, data.video?.format),
+        );
         setSelectedIndex(data.segments[0]?.index ?? null);
         const render = data.render;
         if (render?.status === "queued" || render?.status === "processing") {
@@ -205,15 +236,23 @@ export default function EditorPage({
     })();
   }, [jobId]);
 
-  const issues = useMemo(() => validateSegments(segments), [segments]);
+  const format: VideoFormat =
+    video?.format ??
+    (video ? classifyVideoFormat(video.width, video.height) : "social");
+  const formatProfile = getFormatProfile(format);
+  const transcribing =
+    transcription?.status === "pending" ||
+    transcription?.status === "queued" ||
+    transcription?.status === "processing";
+  const issues = useMemo(
+    () => validateSegments(segments, format),
+    [segments, format],
+  );
   const issueMap = useMemo(() => {
     const map = new Map<number, string[]>();
     for (const issue of issues) map.set(issue.index, issue.errors);
     return map;
   }, [issues]);
-  const format: VideoFormat =
-    video?.format ??
-    (video ? classifyVideoFormat(video.width, video.height) : "social");
   const timedSegment = useMemo(
     () =>
       segments.find(
@@ -228,7 +267,7 @@ export default function EditorPage({
   const activeSegment = selectedSegment ?? timedSegment;
   const previewSegment = isPlaying ? timedSegment : activeSegment;
   const activeCaption = previewSegment
-    ? wrapText(previewSegment.text).lines.join("\n")
+    ? wrapText(previewSegment.text, format).lines.join("\n")
     : "";
   const activeWord = useMemo(() => {
     if (!captionStyle.wordHighlight || !previewSegment) return null;
@@ -370,7 +409,10 @@ export default function EditorPage({
   );
 
   const groupWords = useCallback(() => {
-    const grouped = groupShortSegments(segments);
+    const grouped = groupShortSegments(segments, {
+      maxChars: formatProfile.maxCharsPerLine,
+      maxDurationMs: formatProfile.maxSegmentMs,
+    });
     if (grouped.length === segments.length) return;
     pushHistory();
     setSegments(grouped);
@@ -378,9 +420,159 @@ export default function EditorPage({
       grouped.find((s) => currentMs >= s.start && currentMs <= s.end) ??
       grouped[0];
     setSelectedIndex(containing?.index ?? null);
-  }, [currentMs, pushHistory, segments]);
+  }, [currentMs, formatProfile, pushHistory, segments]);
 
   const wordByWord = useMemo(() => looksWordByWord(segments), [segments]);
+
+  const matches = useMemo(
+    () => findMatches(segments, find.query, find),
+    [segments, find],
+  );
+
+  const replaceText = useCallback(
+    (only?: ReadonlySet<number>) => {
+      const result = replaceInSegments(segments, find.query, find.replacement, find, only);
+      if (result.replaced === 0) return;
+      pushHistory();
+      setSegments(result.segments);
+      setLastReplaced(result.replaced);
+    },
+    [find, pushHistory, segments],
+  );
+
+  const applyCleanupResult = useCallback(
+    (result: CleanupResult) => {
+      pushHistory();
+      setSegments(result.segments);
+      setCuts(result.cuts);
+      setSelectedIndex((current) =>
+        result.segments.some((segment) => segment.index === current)
+          ? current
+          : (result.segments[0]?.index ?? null),
+      );
+    },
+    [pushHistory],
+  );
+
+  const clearCuts = useCallback(() => {
+    pushHistory();
+    setCuts([]);
+  }, [pushHistory]);
+
+  const exportedMs = Math.max(0, (video?.durationMs ?? 0) - totalCutMs(cuts));
+
+  // Preview the cuts: playback jumps over every removed stretch.
+  const cutsRef = useRef<Cut[]>([]);
+  useEffect(() => {
+    cutsRef.current = normalizeCuts(cuts, video?.durationMs || Infinity);
+  }, [cuts, video?.durationMs]);
+  useEffect(() => {
+    if (!isPlaying || cuts.length === 0) return;
+    let frame = 0;
+    const watch = () => {
+      const player = videoRef.current;
+      if (player && !player.paused) {
+        const ms = player.currentTime * 1000;
+        const cut = cutsRef.current.find((item) => ms >= item.start && ms < item.end);
+        if (cut) player.currentTime = cut.end / 1000;
+      }
+      frame = requestAnimationFrame(watch);
+    };
+    frame = requestAnimationFrame(watch);
+    return () => cancelAnimationFrame(frame);
+  }, [cuts.length, isPlaying]);
+
+  const requestTranscription = useCallback(
+    async (replace = false) => {
+      setError(null);
+      try {
+        const response = await fetch(`/api/transcribe/${jobId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ replace }),
+        });
+        const data = await readJsonResponse<{ transcription: Transcription }>(
+          response,
+        );
+        setTranscription(data.transcription);
+      } catch (transcribeError) {
+        setError(
+          transcribeError instanceof Error
+            ? transcribeError.message
+            : "Could not start the transcription.",
+        );
+      }
+    },
+    [jobId],
+  );
+
+  function transcribeFromAudio() {
+    if (
+      segments.length > 0 &&
+      !window.confirm(
+        "Replace the current captions with captions generated from the audio?",
+      )
+    ) {
+      return;
+    }
+    void requestTranscription(segments.length > 0);
+  }
+
+  // Upload sends the transcription request, but a failed one must not strand
+  // the project without captions.
+  useEffect(() => {
+    if (transcription?.status !== "pending" || autoTranscribeRef.current) return;
+    autoTranscribeRef.current = true;
+    void requestTranscription();
+  }, [requestTranscription, transcription?.status]);
+
+  useEffect(() => {
+    if (transcription?.status !== "queued" && transcription?.status !== "processing") {
+      return;
+    }
+    let cancelled = false;
+    let failures = 0;
+    const tick = async () => {
+      try {
+        const response = await fetch(`/api/status/${jobId}`, { cache: "no-store" });
+        const data = await readJsonResponse<{ transcription: Transcription | null }>(
+          response,
+        );
+        if (cancelled || !data.transcription) return;
+        failures = 0;
+        if (data.transcription.status !== "done") {
+          setTranscription(data.transcription);
+          return;
+        }
+        const project = await readJsonResponse<{
+          segments: Segment[];
+          video?: VideoInfo;
+          transcription?: Transcription | null;
+          silences?: Silence[];
+          cuts?: Cut[];
+        }>(await fetch(`/api/segments/${jobId}`, { cache: "no-store" }));
+        if (cancelled) return;
+        historyRef.current = { past: [], future: [], key: null, at: 0 };
+        setHistoryCounts({ undo: 0, redo: 0 });
+        setSegments(project.segments);
+        setSilences(project.silences ?? []);
+        setCuts(project.cuts ?? []);
+        if (project.video) setVideo(project.video);
+        setSelectedIndex(project.segments[0]?.index ?? null);
+        setTranscription(project.transcription ?? data.transcription);
+      } catch {
+        failures += 1;
+        if (failures >= MAX_POLL_FAILURES) {
+          setError("Lost connection while generating captions. Reload to check again.");
+        }
+      }
+    };
+    const timer = window.setInterval(() => void tick(), 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [jobId, transcription?.status]);
 
   async function save(): Promise<boolean> {
     setSaving(true);
@@ -389,7 +581,7 @@ export default function EditorPage({
       const response = await fetch(`/api/segments/${jobId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ segments, captionStyle }),
+        body: JSON.stringify({ segments, captionStyle, cuts }),
       });
       await readJsonResponse(response);
       setDirty(false);
@@ -415,7 +607,11 @@ export default function EditorPage({
     }
     if (!(await save())) return;
     try {
-      const response = await fetch(`/api/render/${jobId}`, { method: "POST" });
+      const response = await fetch(`/api/render/${jobId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: exportMode }),
+      });
       await readJsonResponse(response);
       encodeStartRef.current = null;
       setEtaMs(null);
@@ -540,14 +736,17 @@ export default function EditorPage({
     }
   }, [jobId]);
 
-  function downloadSrt() {
-    const blob = new Blob([serializeSrt(segments)], {
-      type: "application/x-subrip",
-    });
+  // Exported captions follow the exported video, so cuts shift their timing.
+  function downloadCaptions(kind: "srt" | "vtt") {
+    const exported = remapSegments(segments, cuts);
+    const blob = new Blob(
+      [kind === "srt" ? serializeSrt(exported) : serializeVtt(exported)],
+      { type: kind === "srt" ? "application/x-subrip" : "text/vtt" },
+    );
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `captions-${jobId.slice(0, 6)}.srt`;
+    link.download = `captions-${jobId.slice(0, 6)}.${kind}`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -600,7 +799,8 @@ export default function EditorPage({
       const target = event.target;
       const key = event.key.toLowerCase();
       const modifier = event.metaKey || event.ctrlKey;
-      const exportable = !rendering && !saving && status !== "done";
+      const exportable =
+        !rendering && !saving && !transcribing && status !== "done";
 
       if (modifier && key === "enter") {
         event.preventDefault();
@@ -729,15 +929,27 @@ export default function EditorPage({
             </>
           ) : (
             status !== "done" && (
+              <>
+              <select
+                className="studio-export-mode"
+                value={exportMode}
+                onChange={(event) => setExportMode(event.target.value as ExportMode)}
+                aria-label="Export type"
+                title="Burned-in captions are part of the picture. Soft subtitles stay a selectable track in the MP4."
+              >
+                <option value="burned">Burned-in captions</option>
+                <option value="soft">Soft subtitles (track)</option>
+              </select>
               <button
                 type="button"
                 onClick={() => void startRender()}
-                disabled={saving}
+                disabled={saving || transcribing}
                 className="studio-export"
                 title="Export (⌘↵)"
               >
                 {status === "error" ? "Retry export" : "Export"}
               </button>
+              </>
             )
           )}
           {downloadable && (
@@ -784,6 +996,44 @@ export default function EditorPage({
           <div className="render-progress-track">
             <i style={{ width: `${downloadable ? 100 : progress}%` }} />
           </div>
+        </div>
+      )}
+      {transcribing && (
+        <div
+          className={`studio-render-progress ${
+            transcription?.status === "processing" ? "" : "queued"
+          }`}
+          role="progressbar"
+          aria-label="Caption generation progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={transcription?.progress ?? 0}
+        >
+          <div className="render-progress-label" aria-live="polite">
+            <strong>
+              {transcriptionStageLabel(
+                transcription?.status,
+                transcription?.progress ?? 0,
+              )}
+            </strong>
+            <span>
+              Generating captions from the audio. You can adjust the style while
+              you wait.
+            </span>
+          </div>
+          <div className="render-progress-track">
+            <i style={{ width: `${transcription?.progress ?? 0}%` }} />
+          </div>
+        </div>
+      )}
+      {transcription?.status === "error" && (
+        <div className="studio-error" role="alert">
+          <span>
+            {transcription.error ?? "Could not transcribe this video."}
+          </span>
+          <button type="button" onClick={() => void requestTranscription(true)}>
+            Try again
+          </button>
         </div>
       )}
       {error && (
@@ -861,6 +1111,30 @@ export default function EditorPage({
           </button>
           <button
             type="button"
+            className={activeTool === "cleanup" ? "active" : ""}
+            onClick={() =>
+              setActiveTool((current) => (current === "cleanup" ? null : "cleanup"))
+            }
+            title="Clean up pauses and fillers"
+            aria-label="Clean up"
+            aria-pressed={activeTool === "cleanup"}
+          >
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="6" cy="6" r="2.6" />
+              <circle cx="6" cy="18" r="2.6" />
+              <path d="M8 7.6 20 17M8 16.4 20 7" />
+            </svg>
+          </button>
+          <button
+            type="button"
             className={showSafeZone ? "active-soft" : ""}
             onClick={() => setShowSafeZone((current) => !current)}
             aria-label="Toggle safe zone"
@@ -898,6 +1172,21 @@ export default function EditorPage({
                 style={captionStyle}
                 onChange={changeStyle}
               />
+            ) : activeTool === "cleanup" ? (
+              <CleanupPanel
+                segments={segments}
+                silences={silences}
+                cuts={cuts}
+                durationMs={video?.durationMs ?? 0}
+                language={transcription?.language}
+                disabled={transcribing || rendering}
+                onApply={applyCleanupResult}
+                onClearCuts={clearCuts}
+                onSeek={(ms) => {
+                  videoRef.current?.pause();
+                  seek(ms);
+                }}
+              />
             ) : (
               <div className="segments-side-panel">
               <div className="side-panel-heading">
@@ -911,6 +1200,21 @@ export default function EditorPage({
               >
                 {issues.length ? `${issues.length} to review` : "✓ All clear"}
               </div>
+              <FindReplace
+                state={find}
+                matches={matches}
+                selectedIndex={selectedIndex}
+                disabled={transcribing || rendering}
+                lastReplaced={lastReplaced}
+                onChange={(next) => {
+                  setLastReplaced(null);
+                  setFind(next);
+                }}
+                onReplaceAll={() => replaceText()}
+                onReplaceSelected={() =>
+                  selectedIndex !== null && replaceText(new Set([selectedIndex]))
+                }
+              />
               <div className="side-grouping">
                 {wordByWord && (
                   <p>
@@ -922,12 +1226,37 @@ export default function EditorPage({
                   <button type="button" onClick={groupWords}>
                     ⧉ Group words into phrases
                   </button>
-                  <button type="button" onClick={downloadSrt}>
-                    ↓ Download SRT
+                  <button
+                    type="button"
+                    onClick={() => downloadCaptions("srt")}
+                    disabled={segments.length === 0}
+                  >
+                    ↓ SRT
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadCaptions("vtt")}
+                    disabled={segments.length === 0}
+                  >
+                    ↓ VTT
+                  </button>
+                  <button
+                    type="button"
+                    onClick={transcribeFromAudio}
+                    disabled={transcribing || rendering}
+                  >
+                    ✦ Transcribe from audio
                   </button>
                 </div>
               </div>
               <div className="side-segment-list">
+                {segments.length === 0 && (
+                  <p className="side-empty">
+                    {transcribing
+                      ? "Captions will appear here as soon as the audio is transcribed."
+                      : "No captions yet. Transcribe the audio to generate them."}
+                  </p>
+                )}
                 {segments.map((segment) => {
                   const segmentIssues = issueMap.get(segment.index) ?? [];
                   return (
@@ -936,7 +1265,9 @@ export default function EditorPage({
                       type="button"
                       className={`side-segment ${
                         selectedIndex === segment.index ? "active" : ""
-                      } ${segmentIssues.length ? "has-errors" : ""}`}
+                      } ${segmentIssues.length ? "has-errors" : ""} ${
+                        matches.perSegment.has(segment.index) ? "is-match" : ""
+                      }`}
                       onClick={() => selectSegment(segment)}
                       aria-current={
                         selectedIndex === segment.index ? "true" : undefined
@@ -1017,6 +1348,7 @@ export default function EditorPage({
           <div className="playback-bar">
             <span>
               {compactTime(currentMs)} / {compactTime(video?.durationMs ?? 0)}
+              {cuts.length > 0 && ` · ${compactTime(exportedMs)} after cuts`}
             </span>
             <div>
               <button
@@ -1146,10 +1478,10 @@ export default function EditorPage({
             >
               {issueMap.get(activeSegment.index)?.join(" ") ??
                 (() => {
-                  const { lines } = wrapText(activeSegment.text);
-                  return `${lines.length}/${MAX_LINES} lines · ${lines
+                  const { lines } = wrapText(activeSegment.text, format);
+                  return `${lines.length}/${formatProfile.maxLines} lines · ${lines
                     .map((line) => line.length)
-                    .join(" / ")} of ${MAX_CHARS_PER_LINE} chars`;
+                    .join(" / ")} of ${formatProfile.maxCharsPerLine} chars`;
                 })()}
             </span>
           </div>
