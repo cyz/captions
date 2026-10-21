@@ -4,7 +4,7 @@ import { promises as fs } from "fs";
 import { ensureJobDir, jobPaths } from "@/lib/paths";
 import { createVideoUploadUrl, writeArtifact } from "@/lib/artifacts";
 import { isAzureStorageEnabled } from "@/lib/azure";
-import { parseSrt } from "@/lib/srt";
+import { parseCaptions, serializeSrt } from "@/lib/srt";
 import { probeVideo } from "@/lib/ffmpeg";
 import { JobMeta, Transcription, VideoInfo, writeMeta } from "@/lib/store";
 import { classifyVideoFormat } from "@/lib/video-format";
@@ -18,7 +18,7 @@ export const maxDuration = 60;
 
 const MAX_VIDEO_BYTES = 600 * 1024 * 1024; // 600 MB
 const MAX_DURATION_MS = 10 * 60 * 1000; // 10 min
-const MAX_SRT_BYTES = 2 * 1024 * 1024;
+const MAX_CAPTION_BYTES = 2 * 1024 * 1024;
 
 export function GET() {
   const supported = process.env.NETLIFY !== "true";
@@ -77,10 +77,10 @@ interface AzureUploadRequest {
 async function handleAzureUpload(req: NextRequest) {
   const body = (await req.json()) as AzureUploadRequest;
   const video = body.video;
-  const srtText =
-    typeof body.srtText === "string" && body.srtText.trim() !== ""
-      ? body.srtText
-      : undefined;
+  const srtText = body.srtText;
+  if (srtText !== undefined && typeof srtText !== "string") {
+    return NextResponse.json({ error: "Upload an SRT or VTT caption file." }, { status: 400 });
+  }
 
   if (!video) {
     return NextResponse.json({ error: "Upload a video file." }, { status: 400 });
@@ -91,14 +91,14 @@ async function handleAzureUpload(req: NextRequest) {
       { status: 413 },
     );
   }
-  if (srtText && Buffer.byteLength(srtText, "utf8") > MAX_SRT_BYTES) {
+  if (srtText !== undefined && Buffer.byteLength(srtText, "utf8") > MAX_CAPTION_BYTES) {
     return NextResponse.json({ error: "Subtitle file is too large." }, { status: 413 });
   }
 
-  const segments = srtText ? parseSrt(srtText) : [];
-  if (srtText && segments.length === 0) {
+  const segments = srtText !== undefined ? parseCaptions(srtText) : [];
+  if (srtText !== undefined && segments.length === 0) {
     return NextResponse.json(
-      { error: "Could not read subtitles from the .srt file." },
+      { error: "Could not read captions. Upload a valid SRT or VTT file." },
       { status: 400 },
     );
   }
@@ -134,13 +134,13 @@ async function handleAzureUpload(req: NextRequest) {
     video: videoInfo,
     segments,
     captionStyle: getDefaultCaptionStyle(videoInfo.format),
-    ...(srtText ? {} : { transcription: PENDING_TRANSCRIPTION }),
+    ...(srtText !== undefined ? {} : { transcription: PENDING_TRANSCRIPTION }),
   };
 
   await Promise.all([
     writeMeta(meta),
-    ...(srtText
-      ? [writeArtifact(jobId, "srt", srtText, "application/x-subrip")]
+    ...(srtText !== undefined
+      ? [writeArtifact(jobId, "srt", serializeSrt(segments), "application/x-subrip")]
       : []),
   ]);
   const uploadUrl = await createVideoUploadUrl(jobId);
@@ -168,7 +168,10 @@ async function handleLocalUpload(req: NextRequest) {
   if (!(video instanceof File)) {
     return NextResponse.json({ error: "Upload a video file." }, { status: 400 });
   }
-  const srtFile = srt instanceof File && srt.size > 0 ? srt : null;
+  if (srt !== null && !(srt instanceof File)) {
+    return NextResponse.json({ error: "Upload an SRT or VTT caption file." }, { status: 400 });
+  }
+  const srtFile = srt instanceof File ? srt : null;
 
   if (video.size > MAX_VIDEO_BYTES) {
     return NextResponse.json(
@@ -177,27 +180,30 @@ async function handleLocalUpload(req: NextRequest) {
     );
   }
 
-  const jobId = randomUUID();
-  await ensureJobDir(jobId);
-  const paths = jobPaths(jobId);
-
-  await fs.writeFile(paths.video, Buffer.from(await video.arrayBuffer()));
   let segments: JobMeta["segments"] = [];
   if (srtFile) {
-    const srtText = await srtFile.text();
-    if (Buffer.byteLength(srtText, "utf8") > MAX_SRT_BYTES) {
+    if (srtFile.size > MAX_CAPTION_BYTES) {
       return NextResponse.json({ error: "Subtitle file is too large." }, { status: 413 });
     }
-    await fs.writeFile(paths.srt, srtText, "utf8");
+    const srtText = await srtFile.text();
+    if (Buffer.byteLength(srtText, "utf8") > MAX_CAPTION_BYTES) {
+      return NextResponse.json({ error: "Subtitle file is too large." }, { status: 413 });
+    }
 
-    segments = parseSrt(srtText);
+    segments = parseCaptions(srtText);
     if (segments.length === 0) {
       return NextResponse.json(
-        { error: "Could not read subtitles from the .srt file." },
+        { error: "Could not read captions. Upload a valid SRT or VTT file." },
         { status: 400 },
       );
     }
   }
+
+  const jobId = randomUUID();
+  await ensureJobDir(jobId);
+  const paths = jobPaths(jobId);
+  await fs.writeFile(paths.video, Buffer.from(await video.arrayBuffer()));
+  if (srtFile) await fs.writeFile(paths.srt, serializeSrt(segments), "utf8");
 
   let videoInfo;
   try {

@@ -6,14 +6,14 @@
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-required-007808?style=flat-square&logo=ffmpeg&logoColor=white)](https://ffmpeg.org/)
 ![Node.js](https://img.shields.io/badge/Node.js-20%2B-5FA04E?style=flat-square&logo=node.js&logoColor=white)
 
-A focused web app for generating, editing, and burning captions directly into MP4 videos. Vertical videos get a live safe-zone preview designed for **Instagram Reels**, **TikTok**, and **YouTube Shorts**; horizontal long-form videos get their own caption layout. Captions are written from the audio with [Whisper](https://huggingface.co/openai/whisper-small), so you only upload the video.
+A focused web app for generating, editing, and burning captions directly into MP4 videos. Vertical videos get a live safe-zone preview designed for **Instagram Reels**, **TikTok**, and **YouTube Shorts**; horizontal long-form videos get their own caption layout. Generate captions automatically from the audio with [Whisper](https://huggingface.co/openai/whisper-small), or upload an existing SRT or WebVTT file with your video.
 
 ![Caption Burner upload screen](docs/assets/caption-burner-home.png)
 
 ## Features
 
 - **Automatic Captions** - Generate timed, word-synced captions from the audio with Whisper (`whisper-small`). The spoken language is detected automatically, so you only upload the video
-- **Video Upload** - Import an MP4, MOV, or WebM video. Existing captions can still be exported as an SRT file from the editor
+- **Video and Caption Upload** - Import an MP4, MOV, or WebM video. Choose automatic captions (the default) or upload an SRT/VTT file up to 2 MB. Uploaded captions keep their text and timing and skip automatic transcription, with both local and Azure uploads supported
 - **Find and Replace** - Fix names and terms across every caption at once, with match case and whole-word options. Word-by-word timing is kept, and the change can be undone
 - **Clean Up Pauses and Fillers** - Shorten long pauses (found in the audio) and remove hesitations ("hum", "uh", "ahn"), optional filler words, or your own list. The preview skips the cuts, and captions shift to the shorter video
 - **Export Options** - Burned-in captions, or **soft subtitles**: a selectable subtitle track inside the MP4 that does not re-encode the video unless you made cuts. Captions can also be downloaded as SRT or VTT
@@ -32,12 +32,13 @@ A focused web app for generating, editing, and burning captions directly into MP
 ## Usage
 
 1. Select an MP4, MOV, or WebM video, vertical or horizontal.
-2. Choose **Open review workspace**. A transcription progress bar appears in the editor until the captions written from the audio are ready.
-3. Select a segment to preview and edit its text or timing.
-4. Use **Break line** or **Split in time** when a caption needs adjustment.
-5. Resolve any highlighted validation errors.
-6. Optionally open **Clean up** to remove pauses and fillers, and use **Find and replace** in the Captions panel to fix terms.
-7. Pick **Burned-in captions** or **Soft subtitles**, choose **Export**, then download the completed MP4.
+2. Choose **Generate automatically** to detect the spoken language and transcribe the audio, or **Upload SRT or VTT** and select your caption file (up to 2 MB).
+3. Choose **Open review workspace**. Automatic mode shows transcription progress in the editor; uploaded captions are ready for review without transcription.
+4. Select a segment to preview and edit its text or timing.
+5. Use **Break line** or **Split in time** when a caption needs adjustment.
+6. Resolve any highlighted validation errors.
+7. Optionally open **Clean up** to remove pauses and fillers, and use **Find and replace** in the Captions panel to fix terms. Audio pause detection is available for automatically transcribed captions.
+8. Pick **Burned-in captions** or **Soft subtitles**, choose **Export**, then download the completed MP4.
 
 ## Caption Rules
 
@@ -45,6 +46,7 @@ A focused web app for generating, editing, and burning captions directly into MP
 |---|---|
 | Video size | 600 MB maximum |
 | Video duration | 10 minutes maximum |
+| Caption upload | SRT or VTT, 2 MB maximum |
 | Caption lines | 2 per segment |
 
 | Format | Detected when | Reference width | Line length | Caption box |

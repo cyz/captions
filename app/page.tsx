@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { readJsonResponse } from "@/lib/api-response";
+import { parseCaptions } from "@/lib/srt";
 import {
   classifyVideoFormat,
   type VideoFormat,
@@ -51,7 +52,7 @@ function inspectVideo(file: File): Promise<VideoMetadata> {
   });
 }
 
-// Captions always come from the audio. A failed request is not fatal: the
+// Automatic captions come from the audio. A failed request is not fatal: the
 // editor retries it automatically and offers a manual retry.
 async function requestTranscription(jobId: string): Promise<void> {
   await fetch(`/api/transcribe/${jobId}`, { method: "POST" }).catch(
@@ -73,6 +74,8 @@ export default function UploadPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inspectionIdRef = useRef(0);
   const [video, setVideo] = useState<File | null>(null);
+  const [captionSource, setCaptionSource] = useState<"automatic" | "file">("automatic");
+  const [captionFile, setCaptionFile] = useState<File | null>(null);
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const [busy, setBusy] = useState(false);
   const [inspecting, setInspecting] = useState(false);
@@ -134,6 +137,14 @@ export default function UploadPage() {
     }
     setBusy(true);
     try {
+      const uploadedCaptions = captionSource === "file" ? captionFile : null;
+      if (captionSource === "file" && !uploadedCaptions) {
+        throw new Error("Choose an SRT or VTT caption file to continue.");
+      }
+      const captionText = uploadedCaptions ? await uploadedCaptions.text() : undefined;
+      if (captionText !== undefined && parseCaptions(captionText).length === 0) {
+        throw new Error("No captions found. Choose a valid SRT or VTT file.");
+      }
       const capabilityResponse = await fetch("/api/upload");
       const capability = await readJsonResponse<{
         uploadMode: "direct" | "multipart";
@@ -144,6 +155,7 @@ export default function UploadPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            srtText: captionText,
             video: {
               name: video.name,
               size: video.size,
@@ -166,16 +178,17 @@ export default function UploadPage() {
         if (!uploadResponse.ok) {
           throw new Error(`Video upload failed (${uploadResponse.status}).`);
         }
-        await requestTranscription(created.jobId);
+        if (!uploadedCaptions) await requestTranscription(created.jobId);
         router.push(`/editor/${created.jobId}`);
         return;
       }
 
       const form = new FormData();
       form.append("video", video);
+      if (uploadedCaptions) form.append("srt", uploadedCaptions);
       const response = await fetch("/api/upload", { method: "POST", body: form });
       const data = await readJsonResponse<{ jobId: string }>(response);
-      await requestTranscription(data.jobId);
+      if (!uploadedCaptions) await requestTranscription(data.jobId);
       router.push(`/editor/${data.jobId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "An unexpected error occurred.");
@@ -183,7 +196,10 @@ export default function UploadPage() {
     }
   }
 
-  const ready = Boolean(video && metadata && !busy && !inspecting);
+  const ready = Boolean(
+    video && metadata && !busy && !inspecting &&
+    (captionSource === "automatic" || captionFile),
+  );
 
   return (
     <main className="upload-page">
@@ -206,9 +222,9 @@ export default function UploadPage() {
           </div>
           <h1>Captions in the right place, on every screen.</h1>
           <p>
-            From vertical video to full-length episodes: we detect the format,
-            write the captions from the audio, and prepare a tailored review
-            workspace.
+            From vertical video to full-length episodes: we detect the format and
+            prepare a tailored review workspace. Generate captions automatically
+            from the audio, or upload your own SRT or VTT file.
           </p>
           <div className="format-showcase" aria-hidden="true">
             <div className="showcase-landscape">
@@ -229,7 +245,7 @@ export default function UploadPage() {
           </div>
           <div className="benefit-list">
             <span>✓ Automatic aspect ratio detection</span>
-            <span>✓ Captions generated from the audio</span>
+            <span>✓ Automatic captions or your own SRT/VTT</span>
             <span>✓ Format-specific safe zones</span>
             <span>✓ Video-synced review</span>
           </div>
@@ -249,6 +265,7 @@ export default function UploadPage() {
 
             <button
               type="button"
+              disabled={busy}
               className={`dropzone combined-dropzone ${
                 video ? "has-file" : ""
               } ${
@@ -291,7 +308,7 @@ export default function UploadPage() {
                 <div>
                   <strong>Drag the video here</strong>
                   <span>
-                    or click to select it. Captions are written from the audio.
+                    or click to select it. Choose how to add captions below.
                   </span>
                 </div>
               </div>
@@ -318,6 +335,73 @@ export default function UploadPage() {
               </div>
             </button>
 
+            <fieldset className="caption-source" disabled={busy}>
+              <legend>How would you like to add captions?</legend>
+              <p className="caption-source-hint">
+                Let us detect the spoken language and generate captions, or use a file you already have.
+              </p>
+              <div className="caption-source-options">
+                <label className={`caption-source-option ${captionSource === "automatic" ? "is-selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="caption-source"
+                    value="automatic"
+                    checked={captionSource === "automatic"}
+                    onChange={() => {
+                      setCaptionSource("automatic");
+                      setCaptionFile(null);
+                      setError(null);
+                    }}
+                  />
+                  <span>
+                    <strong>Generate automatically</strong>
+                    <small>Detect the language and transcribe the audio. No caption file needed.</small>
+                  </span>
+                </label>
+                <label className={`caption-source-option ${captionSource === "file" ? "is-selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="caption-source"
+                    value="file"
+                    checked={captionSource === "file"}
+                    onChange={() => {
+                      setCaptionSource("file");
+                      setError(null);
+                    }}
+                  />
+                  <span>
+                    <strong>Upload SRT or VTT</strong>
+                    <small>Use your existing text and timing instead of automatic transcription.</small>
+                  </span>
+                </label>
+              </div>
+              {captionSource === "file" && (
+                <div className="caption-file-upload">
+                  <label htmlFor="caption-file">Caption file (.srt or .vtt)</label>
+                  <input
+                    id="caption-file"
+                    type="file"
+                    accept=".srt,.vtt"
+                    aria-describedby="caption-file-hint"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0] ?? null;
+                      setCaptionFile(null);
+                      setError(null);
+                      if (file && (!/\.(srt|vtt)$/i.test(file.name) || file.size === 0 || file.size > 2 * 1024 * 1024)) {
+                        setError("Choose a non-empty SRT or VTT file up to 2 MB.");
+                        e.target.value = "";
+                        return;
+                      }
+                      setCaptionFile(file);
+                    }}
+                  />
+                  <small id="caption-file-hint">
+                    Up to 2 MB. Your captions will open in the editor for review. No automatic transcription will run.
+                  </small>
+                </div>
+              )}
+            </fieldset>
+
             {metadata && (
               <div className="detection-note" role="status">
                 <span className="detection-icon">✓</span>
@@ -327,7 +411,9 @@ export default function UploadPage() {
                   </strong>
                   <span>
                     Editor optimized for {metadata.width}:{metadata.height} and its safe zone.
-                    {" "}Captions will be transcribed from the audio.
+                    {" "}{captionSource === "automatic"
+                      ? "Captions will be generated automatically from the audio."
+                      : "Captions will come from your SRT or VTT file."}
                   </span>
                 </div>
               </div>

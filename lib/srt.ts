@@ -71,6 +71,62 @@ export function parseSrt(content: string): Segment[] {
   return segments;
 }
 
+// Hours are optional in WebVTT ("00:01.000"); cue settings may follow the end.
+const VTT_TIME_RE =
+  /^(?:(\d{2,}):)?([0-5]\d):([0-5]\d)\.(\d{3})[ \t]+-->[ \t]+(?:(\d{2,}):)?([0-5]\d):([0-5]\d)\.(\d{3})(?:[ \t].*)?$/;
+
+function decodeVttText(text: string): string {
+  return text
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lrm;|&rlm;/g, "")
+    .replace(/&amp;/g, "&");
+}
+
+// Parse WebVTT content into segments. Skips the header, NOTE/STYLE/REGION
+// blocks, cue identifiers, cue settings, and inline markup.
+export function parseVtt(content: string): Segment[] {
+  const normalized = content
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+  if (!normalized) return [];
+
+  const segments: Segment[] = [];
+  for (const block of normalized.split(/\n[ \t]*\n/)) {
+    const lines = block.split("\n");
+    if (/^(WEBVTT|NOTE|STYLE|REGION)(\s|$)/.test(lines[0])) continue;
+
+    const timeIndex = lines.findIndex((l) => VTT_TIME_RE.test(l));
+    // Only one identifier line may precede the timing line.
+    if (timeIndex < 0 || timeIndex > 1) continue;
+    const match = VTT_TIME_RE.exec(lines[timeIndex]);
+    if (!match) continue;
+
+    const start = toMs(match[1] ?? "0", match[2], match[3], match[4]);
+    const end = toMs(match[5] ?? "0", match[6], match[7], match[8]);
+    const text = decodeVttText(
+      lines
+        .slice(timeIndex + 1)
+        .filter((l) => l.trim() !== "")
+        .join("\n"),
+    ).trim();
+    if (!text) continue;
+
+    segments.push({ index: segments.length + 1, start, end, text });
+  }
+  return segments;
+}
+
+// Parse an uploaded caption file, detecting SRT or WebVTT from its content.
+export function parseCaptions(content: string): Segment[] {
+  const isVtt = /^WEBVTT(?:[ \t\r\n]|$)/.test(content.trimStart());
+  return isVtt ? parseVtt(content) : parseSrt(content);
+}
+
 // Serialize segments back to SRT (useful for export / debugging).
 export function serializeSrt(segments: Segment[]): string {
   return segments
